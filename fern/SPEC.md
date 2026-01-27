@@ -22,9 +22,9 @@
 - [x] src/llm/tools.ts - Tool definitions registry
 
 ## Core Engine
-- [ ] src/core/context.ts - User context management
-- [ ] src/core/engine.ts - Conversation engine with message chaining
-- [ ] src/core/scheduler.ts - Reminder/job scheduler
+- [x] src/core/context.ts - User context management
+- [x] src/core/engine.ts - Conversation engine with message chaining
+- [x] src/core/scheduler.ts - Reminder/job scheduler
 
 ## Tools
 - [x] src/tools/reminders.ts - RemindMe tool

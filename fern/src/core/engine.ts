@@ -19,10 +19,12 @@ import {
 import { executeTool, getToolsForAnthropic, type UserContext as ToolUserContext } from '../llm/tools.js';
 
 /**
- * Authentication codes for new users
- * Loaded from AUTH_CODES environment variable (comma-separated)
+ * Get authentication codes for new users
+ * Read dynamically from AUTH_CODES environment variable (comma-separated)
  */
-const AUTH_CODES = new Set((process.env.AUTH_CODES || '').split(',').filter(Boolean));
+function getAuthCodes(): Set<string> {
+  return new Set((process.env.AUTH_CODES || '').split(',').filter(Boolean));
+}
 
 /**
  * Chain sender for natural message rhythm
@@ -292,9 +294,10 @@ export class ConversationEngine {
     const trimmedContent = content.trim().toLowerCase();
 
     // Check if this is the first message (ask for magic word)
-    if (!context.identity.name && AUTH_CODES.size > 0) {
+    const authCodes = getAuthCodes();
+    if (!context.identity.name && authCodes.size > 0) {
       // Check if content is a valid auth code
-      if (AUTH_CODES.has(trimmedContent) || AUTH_CODES.has(content.trim())) {
+      if (authCodes.has(trimmedContent) || authCodes.has(content.trim())) {
         // Valid code - ask for name
         await chain.send("Welcome! I'm Fern. What's your name? 🌿");
         await saveMessage(
@@ -331,7 +334,7 @@ export class ConversationEngine {
           "Hey! I don't think we've met. What's the magic word? 🌿"
         );
       }
-    } else if (AUTH_CODES.size === 0) {
+    } else if (authCodes.size === 0) {
       // No auth codes configured - auto-authenticate
       // This is their name
       const name = content.trim();
