@@ -1,0 +1,36 @@
+{
+  "name": "fern",
+  "version": "0.1.0",
+  "description": "Fern - A whimsical personal assistant that lives in your messages",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/db/migrate.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.0",
+    "better-sqlite3": "^11.6.0",
+    "chrono-node": "^2.7.7",
+    "drizzle-orm": "^0.38.0",
+    "express": "^4.21.0",
+    "node-cron": "^3.0.3",
+    "twilio": "^5.3.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.9.0",
+    "@types/node-cron": "^3.0.11",
+    "drizzle-kit": "^0.30.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  }
+}

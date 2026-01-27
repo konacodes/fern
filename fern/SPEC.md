@@ -1,0 +1,49 @@
+# Fern Implementation Spec
+
+## Project Setup
+- [ ] package.json with dependencies (typescript, @anthropic-ai/sdk, twilio, better-sqlite3, drizzle-orm, express, node-cron, chrono-node, zod)
+- [ ] tsconfig.json configured for Node.js
+- [ ] src/config.ts - environment variables and settings
+- [ ] .env.example file
+
+## Database Layer
+- [ ] src/db/schema.ts - Drizzle schema (users, conversations, messages, reminders, notes)
+- [ ] src/db/client.ts - Database connection
+- [ ] src/db/migrations/ - Initial migration
+
+## Messaging Layer
+- [ ] src/messaging/types.ts - MessageAdapter interface
+- [ ] src/messaging/twilio.ts - Twilio SMS adapter
+- [ ] src/messaging/router.ts - Routes messages to correct adapter
+
+## LLM Layer
+- [x] src/llm/client.ts - Anthropic client wrapper with streaming
+- [x] src/llm/prompts.ts - System prompts and Fern personality
+- [x] src/llm/tools.ts - Tool definitions registry
+
+## Core Engine
+- [ ] src/core/context.ts - User context management
+- [ ] src/core/engine.ts - Conversation engine with message chaining
+- [ ] src/core/scheduler.ts - Reminder/job scheduler
+
+## Tools
+- [ ] src/tools/reminders.ts - RemindMe tool
+- [ ] src/tools/calendar.ts - CheckCalendar, AddCalendarEvent tools
+- [ ] src/tools/email.ts - SendEmail tool
+- [ ] src/tools/notes.ts - TakeNote, RecallNote tools
+- [ ] src/tools/web.ts - WebSearch, BrowseWeb tools
+- [ ] src/tools/index.ts - Export all tools
+
+## Utils
+- [ ] src/utils/logger.ts - Logging utility
+- [ ] src/utils/time.ts - Timezone handling
+- [ ] src/utils/parsing.ts - Natural language time parsing
+
+## Entry Point
+- [ ] src/index.ts - Main entry point, webhook server, startup logic
+
+## Tests
+- [ ] tests/setup.ts - Test configuration
+- [ ] tests/engine.test.ts - Conversation engine tests
+- [ ] tests/tools.test.ts - Tool execution tests
+- [ ] tests/messaging.test.ts - Messaging adapter tests
