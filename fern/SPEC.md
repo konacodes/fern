@@ -1,10 +1,10 @@
 # Fern Implementation Spec
 
 ## Project Setup
-- [ ] package.json with dependencies (typescript, @anthropic-ai/sdk, twilio, better-sqlite3, drizzle-orm, express, node-cron, chrono-node, zod)
-- [ ] tsconfig.json configured for Node.js
-- [ ] src/config.ts - environment variables and settings
-- [ ] .env.example file
+- [x] package.json with dependencies (typescript, @anthropic-ai/sdk, twilio, better-sqlite3, drizzle-orm, express, node-cron, chrono-node, zod)
+- [x] tsconfig.json configured for Node.js
+- [x] src/config.ts - environment variables and settings
+- [x] .env.example file
 
 ## Database Layer
 - [x] src/db/schema.ts - Drizzle schema (users, conversations, messages, reminders, notes)
@@ -35,15 +35,16 @@
 - [x] src/tools/index.ts - Export all tools
 
 ## Utils
-- [ ] src/utils/logger.ts - Logging utility
-- [ ] src/utils/time.ts - Timezone handling
-- [ ] src/utils/parsing.ts - Natural language time parsing
+- [x] src/utils/logger.ts - Logging utility
+- [x] src/utils/time.ts - Timezone handling
+- [x] src/utils/parsing.ts - Natural language time parsing
 
 ## Entry Point
-- [ ] src/index.ts - Main entry point, webhook server, startup logic
+- [x] src/index.ts - Main entry point, webhook server, startup logic
 
 ## Tests
-- [ ] tests/setup.ts - Test configuration
-- [ ] tests/engine.test.ts - Conversation engine tests
-- [ ] tests/tools.test.ts - Tool execution tests
+- [x] vitest.config.ts - Test configuration
+- [x] tests/core.test.ts - Conversation engine tests
+- [x] tests/llm.test.ts - LLM and tool registry tests
+- [x] tests/db.test.ts - Database layer tests
 - [x] tests/messaging.test.ts - Messaging adapter tests

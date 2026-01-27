@@ -114,7 +114,7 @@ function initializeLLM(router: MessageRouter): void {
       name: context.identity.name,
       timezone: context.identity.timezone,
       knowledge: context.knowledge as unknown as Record<string, unknown>,
-      pendingReminders: context.pendingReminders,
+      // pendingReminders would need to be loaded from the database
     });
   });
 
