@@ -44,7 +44,9 @@
 
 ## Tests
 - [x] vitest.config.ts - Test configuration
+- [x] tests/setup.ts - Test setup with mock database and utilities
 - [x] tests/core.test.ts - Conversation engine tests
 - [x] tests/llm.test.ts - LLM and tool registry tests
+- [x] tests/tools.test.ts - Tool execution tests
 - [x] tests/db.test.ts - Database layer tests
 - [x] tests/messaging.test.ts - Messaging adapter tests
