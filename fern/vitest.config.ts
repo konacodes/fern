@@ -4,11 +4,19 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    setupFiles: ['./tests/setup.ts'],
     include: ['tests/**/*.test.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
+      include: ['src/**/*.ts'],
+      exclude: ['src/index.ts'],
     },
     testTimeout: 10000,
+    env: {
+      NODE_ENV: 'test',
+      ANTHROPIC_API_KEY: 'test-api-key',
+      LOG_LEVEL: 'error',
+    },
   },
 });

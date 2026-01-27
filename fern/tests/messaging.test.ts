@@ -120,5 +120,119 @@ describe('AdapterCapabilities', () => {
   });
 });
 
+describe('TwilioAdapter', () => {
+  it('should have name "twilio"', async () => {
+    // Import with mocked Twilio
+    const { TwilioAdapter } = await import('../src/messaging/twilio.js');
+
+    const adapter = new TwilioAdapter({
+      accountSid: 'ACtest123',
+      authToken: 'test-auth-token',
+      phoneNumber: '+15551234567',
+    });
+
+    expect(adapter.name).toBe('twilio');
+  });
+
+  it('should return correct capabilities', async () => {
+    const { TwilioAdapter } = await import('../src/messaging/twilio.js');
+
+    const adapter = new TwilioAdapter({
+      accountSid: 'ACtest123',
+      authToken: 'test-auth-token',
+      phoneNumber: '+15551234567',
+    });
+
+    const capabilities = adapter.getCapabilities();
+
+    expect(capabilities.typingIndicator).toBe(false); // SMS doesn't support
+    expect(capabilities.readReceipts).toBe(false);
+    expect(capabilities.media).toBe(true); // MMS supports media
+    expect(capabilities.maxMessageLength).toBe(1600);
+  });
+
+  it('should create an Express router for webhooks', async () => {
+    const { TwilioAdapter } = await import('../src/messaging/twilio.js');
+
+    const adapter = new TwilioAdapter({
+      accountSid: 'ACtest123',
+      authToken: 'test-auth-token',
+      phoneNumber: '+15551234567',
+    });
+
+    const router = adapter.getRouter();
+    expect(router).toBeDefined();
+  });
+
+  it('sendTypingIndicator should be no-op for SMS', async () => {
+    const { TwilioAdapter } = await import('../src/messaging/twilio.js');
+
+    const adapter = new TwilioAdapter({
+      accountSid: 'ACtest123',
+      authToken: 'test-auth-token',
+      phoneNumber: '+15551234567',
+    });
+
+    // Should not throw
+    await expect(adapter.sendTypingIndicator('+15559876543')).resolves.toBeUndefined();
+  });
+});
+
+describe('Webhook Parsing', () => {
+  it('should parse incoming SMS webhook body', () => {
+    // Simulate Twilio webhook body structure
+    const webhookBody = {
+      From: '+15559876543',
+      To: '+15551234567',
+      Body: 'Hello Fern!',
+      MessageSid: 'SM1234567890',
+      NumMedia: '0',
+    };
+
+    // Extract message data like the adapter does
+    const userId = webhookBody.From;
+    const content = webhookBody.Body || '';
+    const messageId = webhookBody.MessageSid;
+    const numMedia = parseInt(webhookBody.NumMedia || '0', 10);
+
+    expect(userId).toBe('+15559876543');
+    expect(content).toBe('Hello Fern!');
+    expect(messageId).toBe('SM1234567890');
+    expect(numMedia).toBe(0);
+  });
+
+  it('should parse webhook with media attachments', () => {
+    const webhookBody = {
+      From: '+15559876543',
+      To: '+15551234567',
+      Body: 'Check this out!',
+      MessageSid: 'SM1234567890',
+      NumMedia: '2',
+      MediaUrl0: 'https://api.twilio.com/media/image1.jpg',
+      MediaContentType0: 'image/jpeg',
+      MediaUrl1: 'https://api.twilio.com/media/file.pdf',
+      MediaContentType1: 'application/pdf',
+    };
+
+    const numMedia = parseInt(webhookBody.NumMedia || '0', 10);
+    expect(numMedia).toBe(2);
+
+    // Extract media like the adapter does
+    const media = [];
+    for (let i = 0; i < numMedia; i++) {
+      const mediaUrl = (webhookBody as Record<string, string>)[`MediaUrl${i}`];
+      const mediaType = (webhookBody as Record<string, string>)[`MediaContentType${i}`];
+      if (mediaUrl) {
+        media.push({ url: mediaUrl, mimeType: mediaType });
+      }
+    }
+
+    expect(media.length).toBe(2);
+    expect(media[0].url).toContain('image1.jpg');
+    expect(media[0].mimeType).toBe('image/jpeg');
+    expect(media[1].mimeType).toBe('application/pdf');
+  });
+});
+
 // Note: MessageRouter tests require database integration
-// These tests are in a separate integration test file
+// These tests are in a separate integration test file (core.test.ts)

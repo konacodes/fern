@@ -45,8 +45,9 @@
 ## Tests
 - [x] vitest.config.ts - Test configuration
 - [x] tests/setup.ts - Test setup with mock database and utilities
-- [x] tests/core.test.ts - Conversation engine tests
+- [x] tests/engine.test.ts - Conversation engine tests (handleIncomingMessage, message chaining, tool execution, auth flow, locks)
+- [x] tests/core.test.ts - Core component tests (context, scheduler)
 - [x] tests/llm.test.ts - LLM and tool registry tests
-- [x] tests/tools.test.ts - Tool execution tests
+- [x] tests/tools.test.ts - Tool execution tests (RemindMe, TakeNote, RecallNote, calendar, email, web)
 - [x] tests/db.test.ts - Database layer tests
-- [x] tests/messaging.test.ts - Messaging adapter tests
+- [x] tests/messaging.test.ts - Messaging adapter tests (Twilio adapter, webhook parsing, router)
