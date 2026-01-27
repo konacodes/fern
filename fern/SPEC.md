@@ -27,12 +27,12 @@
 - [ ] src/core/scheduler.ts - Reminder/job scheduler
 
 ## Tools
-- [ ] src/tools/reminders.ts - RemindMe tool
-- [ ] src/tools/calendar.ts - CheckCalendar, AddCalendarEvent tools
-- [ ] src/tools/email.ts - SendEmail tool
-- [ ] src/tools/notes.ts - TakeNote, RecallNote tools
-- [ ] src/tools/web.ts - WebSearch, BrowseWeb tools
-- [ ] src/tools/index.ts - Export all tools
+- [x] src/tools/reminders.ts - RemindMe tool
+- [x] src/tools/calendar.ts - CheckCalendar, AddCalendarEvent tools
+- [x] src/tools/email.ts - SendEmail tool
+- [x] src/tools/notes.ts - TakeNote, RecallNote tools
+- [x] src/tools/web.ts - WebSearch, BrowseWeb tools
+- [x] src/tools/index.ts - Export all tools
 
 ## Utils
 - [ ] src/utils/logger.ts - Logging utility

@@ -64,8 +64,6 @@ export const RemindMeTool: Tool<typeof RemindMeParams> = {
       message,
       triggerType: 'time',
       triggerValue: triggerTime.toISOString(),
-      status: 'pending',
-      createdAt: new Date(),
     });
 
     // Format the trigger time for confirmation

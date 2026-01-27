@@ -33,8 +33,7 @@ export const TakeNoteTool: Tool<typeof TakeNoteParams> = {
       id,
       userId: userContext.userId,
       content,
-      tags: tags ? JSON.stringify(tags) : null,
-      createdAt: new Date(),
+      tags: tags ? JSON.stringify(tags) : undefined,
     });
 
     return {
