@@ -35,7 +35,8 @@ export function registerTool<TParams extends ZodSchema>(tool: Tool<TParams>): vo
   if (toolRegistry.has(tool.name)) {
     console.warn(`Tool "${tool.name}" is already registered. Overwriting.`);
   }
-  toolRegistry.set(tool.name, tool as Tool);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  toolRegistry.set(tool.name, tool as unknown as Tool<any>);
 }
 
 /**
@@ -52,12 +53,21 @@ export function getTool(name: string): Tool | undefined {
   return toolRegistry.get(name);
 }
 
+// Type for Zod internal definition with typeName
+interface ZodDefWithTypeName {
+  typeName?: string;
+  description?: string;
+  values?: unknown[];
+  innerType?: ZodSchema;
+  options?: ZodSchema[];
+}
+
 /**
  * Convert Zod schema to JSON Schema for Anthropic API
  */
 function zodToJsonSchema(schema: ZodSchema): Record<string, unknown> {
   // Get the shape of the schema
-  const def = schema._def;
+  const def = schema._def as ZodDefWithTypeName;
 
   if (def.typeName === 'ZodObject') {
     const shape = (schema as z.ZodObject<z.ZodRawShape>).shape;
@@ -66,12 +76,12 @@ function zodToJsonSchema(schema: ZodSchema): Record<string, unknown> {
 
     for (const [key, value] of Object.entries(shape)) {
       const fieldSchema = value as ZodSchema;
-      const fieldDef = fieldSchema._def;
+      const fieldDef = fieldSchema._def as ZodDefWithTypeName;
 
       // Check if field is optional
       const isOptional = fieldDef.typeName === 'ZodOptional';
-      const innerSchema = isOptional ? fieldDef.innerType : fieldSchema;
-      const innerDef = innerSchema._def;
+      const innerSchema = isOptional ? fieldDef.innerType! : fieldSchema;
+      const innerDef = innerSchema._def as ZodDefWithTypeName;
 
       if (!isOptional) {
         required.push(key);
@@ -91,7 +101,7 @@ function zodToJsonSchema(schema: ZodSchema): Record<string, unknown> {
   return { type: 'object', properties: {} };
 }
 
-function zodFieldToJsonSchema(schema: ZodSchema, def: z.ZodTypeDef & { typeName?: string; description?: string; values?: unknown[]; innerType?: ZodSchema; options?: ZodSchema[] }): Record<string, unknown> {
+function zodFieldToJsonSchema(schema: ZodSchema, def: ZodDefWithTypeName): Record<string, unknown> {
   const result: Record<string, unknown> = {};
 
   // Add description if present
@@ -112,7 +122,7 @@ function zodFieldToJsonSchema(schema: ZodSchema, def: z.ZodTypeDef & { typeName?
     case 'ZodArray':
       result.type = 'array';
       if (def.innerType) {
-        result.items = zodFieldToJsonSchema(def.innerType, def.innerType._def);
+        result.items = zodFieldToJsonSchema(def.innerType, def.innerType._def as ZodDefWithTypeName);
       }
       break;
     case 'ZodEnum':
@@ -121,12 +131,12 @@ function zodFieldToJsonSchema(schema: ZodSchema, def: z.ZodTypeDef & { typeName?
       break;
     case 'ZodOptional':
       if (def.innerType) {
-        return zodFieldToJsonSchema(def.innerType, def.innerType._def);
+        return zodFieldToJsonSchema(def.innerType, def.innerType._def as ZodDefWithTypeName);
       }
       break;
     case 'ZodUnion':
       if (def.options) {
-        result.oneOf = def.options.map((opt: ZodSchema) => zodFieldToJsonSchema(opt, opt._def));
+        result.oneOf = def.options.map((opt: ZodSchema) => zodFieldToJsonSchema(opt, opt._def as ZodDefWithTypeName));
       }
       break;
     default:

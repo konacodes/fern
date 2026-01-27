@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import Database, { type Database as DatabaseType } from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import * as schema from './schema.js';
 import { resolve, dirname } from 'path';
@@ -23,7 +23,7 @@ const getDatabasePath = (): string => {
 };
 
 // Create the SQLite connection
-const sqlite = new Database(getDatabasePath());
+const sqlite: DatabaseType = new Database(getDatabasePath());
 
 // Enable WAL mode for better concurrent performance
 sqlite.pragma('journal_mode = WAL');
