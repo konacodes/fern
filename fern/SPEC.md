@@ -7,9 +7,9 @@
 - [ ] .env.example file
 
 ## Database Layer
-- [ ] src/db/schema.ts - Drizzle schema (users, conversations, messages, reminders, notes)
-- [ ] src/db/client.ts - Database connection
-- [ ] src/db/migrations/ - Initial migration
+- [x] src/db/schema.ts - Drizzle schema (users, conversations, messages, reminders, notes)
+- [x] src/db/client.ts - Database connection
+- [x] src/db/migrations/ - Initial migration
 
 ## Messaging Layer
 - [x] src/messaging/types.ts - MessageAdapter interface
