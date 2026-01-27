@@ -12,9 +12,9 @@
 - [ ] src/db/migrations/ - Initial migration
 
 ## Messaging Layer
-- [ ] src/messaging/types.ts - MessageAdapter interface
-- [ ] src/messaging/twilio.ts - Twilio SMS adapter
-- [ ] src/messaging/router.ts - Routes messages to correct adapter
+- [x] src/messaging/types.ts - MessageAdapter interface
+- [x] src/messaging/twilio.ts - Twilio SMS adapter
+- [x] src/messaging/router.ts - Routes messages to correct adapter
 
 ## LLM Layer
 - [x] src/llm/client.ts - Anthropic client wrapper with streaming
@@ -46,4 +46,4 @@
 - [ ] tests/setup.ts - Test configuration
 - [ ] tests/engine.test.ts - Conversation engine tests
 - [ ] tests/tools.test.ts - Tool execution tests
-- [ ] tests/messaging.test.ts - Messaging adapter tests
+- [x] tests/messaging.test.ts - Messaging adapter tests

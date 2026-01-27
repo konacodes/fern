@@ -10,17 +10,10 @@
  * 3. Import the tool in this file
  */
 
-// Import all tools to register them
-import './reminders.js';
-import './calendar.js';
-import './email.js';
-import './notes.js';
-import './web.js';
-
-// Re-export individual tools for direct access if needed
+// Import all tools to register them (side effect: registers with the tool registry)
 export { RemindMeTool } from './reminders.js';
 export { CheckCalendarTool, AddCalendarEventTool } from './calendar.js';
-export { SendEmailTool } from './email.js';
+export { default as SendEmailTool } from './email.js';
 export { TakeNoteTool, RecallNoteTool } from './notes.js';
 export { WebSearchTool, BrowseWebTool } from './web.js';
 
