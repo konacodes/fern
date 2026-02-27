@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use fern::{ai::cerebras::CerebrasClient, db, engine::conversation::ConversationEngine};
 use fern::{Config, FernBot};
 use tracing_subscriber::EnvFilter;
 
@@ -13,7 +16,11 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = Config::from_env();
-    let bot = FernBot::new(config).await?;
+    std::fs::create_dir_all(&config.data_dir)?;
+    let db = db::init_db(&config.database_url).await?;
+    let cerebras = CerebrasClient::new(&config);
+    let engine = Arc::new(ConversationEngine::new(cerebras, db));
+    let bot = FernBot::new(config, engine).await?;
     bot.run().await?;
     Ok(())
 }
