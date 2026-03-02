@@ -88,11 +88,49 @@ pub async fn get_recent_messages(
     Ok(messages)
 }
 
+pub async fn get_messages_since(
+    pool: &SqlitePool,
+    since: chrono::DateTime<chrono::Local>,
+) -> Result<Vec<StoredMessage>, sqlx::Error> {
+    let since_text = since.format("%Y-%m-%d %H:%M:%S").to_string();
+    let rows = sqlx::query(
+        "SELECT id, user_id, room_id, role, content, created_at
+         FROM messages
+         WHERE datetime(created_at) >= datetime(?)
+         ORDER BY datetime(created_at), rowid;",
+    )
+    .bind(since_text)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| StoredMessage {
+            id: row.get::<String, _>("id"),
+            user_id: row.get::<String, _>("user_id"),
+            room_id: row.get::<String, _>("room_id"),
+            role: row.get::<String, _>("role"),
+            content: row.get::<String, _>("content"),
+            created_at: row.get::<String, _>("created_at"),
+        })
+        .collect())
+}
+
+pub async fn delete_room_messages(pool: &SqlitePool, room_id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM messages WHERE room_id = ?;")
+        .bind(room_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::{Duration as ChronoDuration, Local};
+
     use crate::db::init_db;
 
-    use super::{get_recent_messages, save_message, upsert_user};
+    use super::{get_messages_since, get_recent_messages, save_message, upsert_user};
 
     #[tokio::test]
     async fn save_and_retrieve_messages() {
@@ -193,5 +231,52 @@ mod tests {
                 .expect("query should succeed");
 
         assert_eq!(display_name.as_deref(), Some("Alice Two"));
+    }
+
+    #[tokio::test]
+    async fn get_messages_since_filters() {
+        let pool = init_db("sqlite::memory:")
+            .await
+            .expect("db init should succeed");
+
+        upsert_user(&pool, "@alice:example.org", Some("Alice"))
+            .await
+            .expect("upsert should succeed");
+
+        sqlx::query(
+            "INSERT INTO messages (id, user_id, room_id, role, content, created_at)
+             VALUES (?, ?, ?, ?, ?, ?);",
+        )
+        .bind("old-msg")
+        .bind("@alice:example.org")
+        .bind("!room:example.org")
+        .bind("user")
+        .bind("old")
+        .bind(
+            (Local::now() - ChronoDuration::days(1))
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string(),
+        )
+        .execute(&pool)
+        .await
+        .expect("insert should succeed");
+
+        save_message(
+            &pool,
+            "@alice:example.org",
+            "!room:example.org",
+            "user",
+            "new",
+        )
+        .await
+        .expect("save should succeed");
+
+        let since = Local::now() - ChronoDuration::hours(1);
+        let recent = get_messages_since(&pool, since)
+            .await
+            .expect("query should succeed");
+
+        assert!(recent.iter().any(|msg| msg.content == "new"));
+        assert!(recent.iter().all(|msg| msg.content != "old"));
     }
 }

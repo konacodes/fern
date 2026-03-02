@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
+use futures_util::future::BoxFuture;
 use matrix_sdk::{
     config::SyncSettings,
     room::Room,
@@ -14,7 +15,13 @@ use matrix_sdk::{
 };
 use tokio::time::sleep;
 
-use crate::{engine::conversation::ConversationEngine, sender::split_message, Config};
+use crate::{
+    db::messages::delete_room_messages,
+    memory::{write_memory, MEMORY_TEMPLATE},
+    orchestrator::engine::Orchestrator,
+    sender::split_message,
+    Config,
+};
 
 pub type BotResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -44,11 +51,11 @@ pub fn should_echo(sender: &UserId, own_id: &UserId, msg: EchoMessage<'_>) -> Op
 
 pub struct FernBot {
     pub client: Client,
-    pub engine: Arc<ConversationEngine>,
+    pub orchestrator: Arc<Orchestrator>,
 }
 
 impl FernBot {
-    pub async fn new(config: Config, engine: Arc<ConversationEngine>) -> BotResult<Self> {
+    pub async fn new(config: Config, orchestrator: Arc<Orchestrator>) -> BotResult<Self> {
         let client = Client::builder()
             .homeserver_url(config.homeserver_url.clone())
             .build()
@@ -62,7 +69,10 @@ impl FernBot {
 
         tracing::info!(user = %config.bot_user, "logged in");
 
-        Ok(Self { client, engine })
+        Ok(Self {
+            client,
+            orchestrator,
+        })
     }
 
     pub async fn run(&self) -> BotResult<()> {
@@ -73,12 +83,12 @@ impl FernBot {
             .to_owned();
         let message_own_id: OwnedUserId = own_id.clone();
         let invite_own_id: OwnedUserId = own_id;
-        let engine = Arc::clone(&self.engine);
+        let orchestrator = Arc::clone(&self.orchestrator);
 
         self.client
             .add_event_handler(move |event: SyncRoomMessageEvent, room: Room| {
                 let own_id = message_own_id.clone();
-                let engine = Arc::clone(&engine);
+                let orchestrator = Arc::clone(&orchestrator);
                 async move {
                     tracing::debug!(
                         room_id = %room.room_id(),
@@ -99,14 +109,48 @@ impl FernBot {
                         _ => return,
                     };
 
-                    let response = match engine
-                        .respond(event.sender().as_ref(), room.room_id().as_ref(), text)
-                        .await
-                    {
-                        Ok(response) => response,
-                        Err(err) => {
-                            tracing::error!(error = %err, "conversation engine failed");
-                            return;
+                    let response = if text.trim() == "/reset" {
+                        match write_memory(&orchestrator.data_dir, MEMORY_TEMPLATE) {
+                            Ok(()) => match delete_room_messages(&orchestrator.db, room.room_id().as_ref()).await {
+                                Ok(()) => "factory reset complete 🌿 fresh start".to_owned(),
+                                Err(err) => {
+                                    tracing::error!(error = %err, "failed to clear room messages during reset");
+                                    "hmm i couldn't reset chat history right now".to_owned()
+                                }
+                            },
+                            Err(err) => {
+                                tracing::error!(error = %err, "failed to reset memory file");
+                                "hmm i couldn't reset memory right now".to_owned()
+                            }
+                        }
+                    } else {
+                        let interim_room = room.clone();
+                        let send_fn =
+                            move |message: String| -> BoxFuture<'static, Result<(), String>> {
+                            let interim_room = interim_room.clone();
+                            Box::pin(async move {
+                                interim_room
+                                    .send(RoomMessageEventContent::text_plain(message))
+                                    .await
+                                    .map(|_| ())
+                                    .map_err(|err| err.to_string())
+                            })
+                        };
+
+                        match orchestrator
+                            .process_message(
+                                event.sender().as_ref(),
+                                room.room_id().as_ref(),
+                                text,
+                                send_fn,
+                            )
+                            .await
+                        {
+                            Ok(response) => response,
+                            Err(err) => {
+                                tracing::error!(error = %err, "orchestrator processing failed");
+                                "hmm something went wrong on my end, give me a sec 🌿".to_owned()
+                            }
                         }
                     };
 
@@ -163,7 +207,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::FernBot;
-    use crate::Config;
+    use crate::{
+        ai::cerebras::CerebrasClient, orchestrator::engine::Orchestrator, tools::ToolRegistry,
+        Config,
+    };
 
     #[tokio::test]
     async fn fern_bot_new_returns_err_for_bad_homeserver_url() {
@@ -182,12 +229,16 @@ mod tests {
         let db = crate::db::init_db("sqlite::memory:")
             .await
             .expect("db should initialize");
-        let cerebras = crate::ai::cerebras::CerebrasClient::new(&config);
-        let engine = Arc::new(crate::engine::conversation::ConversationEngine::new(
-            cerebras, db,
+        let cerebras = Arc::new(CerebrasClient::new(&config));
+        let registry = Arc::new(ToolRegistry::new());
+        let orchestrator = Arc::new(Orchestrator::new(
+            cerebras,
+            registry,
+            config.data_dir.clone(),
+            db,
         ));
 
-        let result = FernBot::new(config, engine).await;
+        let result = FernBot::new(config, orchestrator).await;
         assert!(result.is_err(), "expected Err for invalid homeserver URL");
     }
 }
