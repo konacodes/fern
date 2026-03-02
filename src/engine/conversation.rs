@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use sqlx::SqlitePool;
 
 use crate::{
@@ -26,12 +28,12 @@ rules:
 - use emoji sparingly — 🌿 is your signature but don't overdo it"#;
 
 pub struct ConversationEngine {
-    pub cerebras: CerebrasClient,
+    pub cerebras: Arc<CerebrasClient>,
     pub db: SqlitePool,
 }
 
 impl ConversationEngine {
-    pub fn new(cerebras: CerebrasClient, db: SqlitePool) -> Self {
+    pub fn new(cerebras: Arc<CerebrasClient>, db: SqlitePool) -> Self {
         Self { cerebras, db }
     }
 
@@ -47,14 +49,16 @@ impl ConversationEngine {
         let recent = get_recent_messages(&self.db, room_id, 30).await?;
         let history = recent
             .into_iter()
-            .map(|stored| ChatMessage {
-                role: stored.role,
-                content: stored.content,
-            })
+            .map(|stored| ChatMessage::new(stored.role, stored.content))
             .collect::<Vec<_>>();
 
-        let response = match self.cerebras.chat(FERN_SYSTEM_PROMPT, history).await {
-            Ok(text) => text,
+        let response = match self.cerebras.chat(FERN_SYSTEM_PROMPT, history, None).await {
+            Ok(response) => response
+                .choices
+                .into_iter()
+                .next()
+                .and_then(|choice| choice.message.content)
+                .unwrap_or_else(|| "hmm i got an empty response, try again?".to_owned()),
             Err(err) => {
                 tracing::error!(error = %err, "failed to generate ai response");
                 "hmm something went wrong on my end, give me a sec 🌿".to_owned()
@@ -68,6 +72,8 @@ impl ConversationEngine {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use serde_json::json;
     use wiremock::{
         matchers::{body_json, method, path},
@@ -99,7 +105,7 @@ mod tests {
     async fn respond_saves_user_and_messages() {
         let server = MockServer::start().await;
         let config = test_config(format!("{}/v1", server.uri()));
-        let cerebras = CerebrasClient::new(&config);
+        let cerebras = Arc::new(CerebrasClient::new(&config));
         let db = init_db("sqlite::memory:")
             .await
             .expect("db init should succeed");
@@ -151,7 +157,7 @@ mod tests {
     async fn respond_includes_history() {
         let server = MockServer::start().await;
         let config = test_config(format!("{}/v1", server.uri()));
-        let cerebras = CerebrasClient::new(&config);
+        let cerebras = Arc::new(CerebrasClient::new(&config));
         let db = init_db("sqlite::memory:")
             .await
             .expect("db init should succeed");
@@ -213,7 +219,7 @@ mod tests {
     async fn respond_handles_ai_failure() {
         let server = MockServer::start().await;
         let config = test_config(format!("{}/v1", server.uri()));
-        let cerebras = CerebrasClient::new(&config);
+        let cerebras = Arc::new(CerebrasClient::new(&config));
         let db = init_db("sqlite::memory:")
             .await
             .expect("db init should succeed");

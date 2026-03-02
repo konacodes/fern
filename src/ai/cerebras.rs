@@ -6,8 +6,66 @@ pub type AiResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
+    #[serde(default = "default_assistant_role")]
     pub role: String,
-    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+}
+
+fn default_assistant_role() -> String {
+    "assistant".to_owned()
+}
+
+impl ChatMessage {
+    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: Some(content.into()),
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::new("system", content)
+    }
+
+    pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_owned(),
+            content: Some(content.into()),
+            tool_call_id: Some(tool_call_id.into()),
+            tool_calls: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub call_type: String,
+    pub function: ToolFunctionCall,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolFunctionCall {
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ChatCompletionResponse {
+    pub choices: Vec<ChatCompletionChoice>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ChatCompletionChoice {
+    pub message: ChatMessage,
 }
 
 #[derive(Clone, Debug)]
@@ -28,12 +86,14 @@ impl CerebrasClient {
         }
     }
 
-    pub async fn chat(&self, system: &str, messages: Vec<ChatMessage>) -> AiResult<String> {
+    pub async fn chat(
+        &self,
+        system: &str,
+        messages: Vec<ChatMessage>,
+        tools: Option<Vec<serde_json::Value>>,
+    ) -> AiResult<ChatCompletionResponse> {
         let mut all_messages = Vec::with_capacity(messages.len() + 1);
-        all_messages.push(ChatMessage {
-            role: "system".to_owned(),
-            content: system.to_owned(),
-        });
+        all_messages.push(ChatMessage::system(system));
         all_messages.extend(messages);
 
         let request_body = ChatCompletionRequest {
@@ -41,6 +101,8 @@ impl CerebrasClient {
             messages: all_messages,
             max_tokens: 512,
             temperature: 0.7,
+            parallel_tool_calls: tools.as_ref().map(|_| false),
+            tools,
         };
 
         let endpoint = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
@@ -59,17 +121,10 @@ impl CerebrasClient {
             return Err(format!("Cerebras API returned HTTP {}: {body}", status.as_u16()).into());
         }
 
-        let parsed: ChatCompletionResponse = response
-            .json()
+        response
+            .json::<ChatCompletionResponse>()
             .await
-            .map_err(|err| format!("failed to parse Cerebras response JSON: {err}"))?;
-
-        parsed
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|choice| choice.message.content)
-            .ok_or_else(|| "Cerebras response missing choices[0].message.content".into())
+            .map_err(|err| format!("failed to parse Cerebras response JSON: {err}").into())
     }
 }
 
@@ -79,21 +134,10 @@ struct ChatCompletionRequest {
     messages: Vec<ChatMessage>,
     max_tokens: u32,
     temperature: f32,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionResponse {
-    choices: Vec<ChatCompletionChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionChoice {
-    message: ChatCompletionResponseMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionResponseMessage {
-    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parallel_tool_calls: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<serde_json::Value>>,
 }
 
 #[cfg(test)]
@@ -149,20 +193,84 @@ mod tests {
             .mount(&server)
             .await;
 
+        let response = client
+            .chat(
+                "system prompt",
+                vec![ChatMessage::new("user", "hello fern")],
+                None,
+            )
+            .await
+            .expect("chat should succeed");
+        assert_eq!(
+            response.choices[0].message.content.as_deref(),
+            Some("hi there")
+        );
+    }
+
+    #[tokio::test]
+    async fn cerebras_request_includes_tools() {
+        let server = MockServer::start().await;
+        let config = test_config(format!("{}/v1", server.uri()));
+        let client = CerebrasClient::new(&config);
+
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "current_time",
+                "description": "get current date and time",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": false
+                }
+            }
+        })];
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_json(json!({
+                "model": "qwen-3-235b",
+                "messages": [
+                    { "role": "system", "content": "system prompt" },
+                    { "role": "user", "content": "what time is it?" }
+                ],
+                "max_tokens": 512,
+                "temperature": 0.7,
+                "parallel_tool_calls": false,
+                "tools": tools
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{ "message": { "content": "ok" } }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
         let _ = client
             .chat(
                 "system prompt",
-                vec![ChatMessage {
-                    role: "user".to_owned(),
-                    content: "hello fern".to_owned(),
-                }],
+                vec![ChatMessage::new("user", "what time is it?")],
+                Some(vec![json!({
+                    "type": "function",
+                    "function": {
+                        "name": "current_time",
+                        "description": "get current date and time",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                            "additionalProperties": false
+                        }
+                    }
+                })]),
             )
             .await
             .expect("chat should succeed");
     }
 
     #[tokio::test]
-    async fn cerebras_parses_response() {
+    async fn cerebras_parses_tool_calls() {
         let server = MockServer::start().await;
         let config = test_config(format!("{}/v1", server.uri()));
         let client = CerebrasClient::new(&config);
@@ -170,16 +278,38 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "choices": [{ "message": { "content": "fern reply" } }]
+                "choices": [{
+                    "message": {
+                        "content": "let me check",
+                        "tool_calls": [{
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {
+                                "name": "current_time",
+                                "arguments": "{}"
+                            }
+                        }]
+                    }
+                }]
             })))
             .mount(&server)
             .await;
 
-        let text = client
-            .chat("system", vec![])
+        let response = client
+            .chat(
+                "system",
+                vec![ChatMessage::new("user", "time?")],
+                Some(vec![]),
+            )
             .await
-            .expect("chat should parse response");
-        assert_eq!(text, "fern reply");
+            .expect("chat should parse tool calls");
+        let tool_calls = response.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool calls should exist");
+        assert_eq!(tool_calls[0].id, "call_123");
+        assert_eq!(tool_calls[0].function.name, "current_time");
     }
 
     #[tokio::test]
@@ -195,7 +325,7 @@ mod tests {
             .await;
 
         let err = client
-            .chat("system", vec![])
+            .chat("system", vec![], None)
             .await
             .expect_err("chat should fail on http 500")
             .to_string();
@@ -219,7 +349,7 @@ mod tests {
             .await;
 
         let err = client
-            .chat("system", vec![])
+            .chat("system", vec![], None)
             .await
             .expect_err("chat should fail on malformed JSON")
             .to_string();

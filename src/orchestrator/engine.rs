@@ -1,13 +1,14 @@
 use std::{path::Path, sync::Arc};
 
 use futures_util::future::BoxFuture;
+use serde_json::json;
 use sqlx::SqlitePool;
 
 use crate::{
     ai::cerebras::{CerebrasClient, ChatMessage},
     db::messages::{get_recent_messages, save_message, upsert_user},
     engine::conversation::FERN_SYSTEM_PROMPT,
-    orchestrator::{parse_response, OrchestratorAction, ORCHESTRATOR_PROMPT},
+    orchestrator::ORCHESTRATOR_PROMPT,
     tools::ToolRegistry,
 };
 
@@ -52,80 +53,92 @@ impl Orchestrator {
             .map_err(|err| format!("failed to load recent messages: {err}"))?;
         let mut history = recent
             .into_iter()
-            .map(|stored| ChatMessage {
-                role: stored.role,
-                content: stored.content,
-            })
+            .map(|stored| ChatMessage::new(stored.role, stored.content))
             .collect::<Vec<_>>();
 
         let memory = read_memory_file(&self.data_dir);
-        let system_prompt = format!(
-            "{FERN_SYSTEM_PROMPT}\n\ncurrent memory:\n{memory}\n\n{ORCHESTRATOR_PROMPT}\n\n{}",
-            self.registry.build_tools_prompt()
-        );
+        let tools_schema = self.registry.build_tools_schema();
+        let system_prompt =
+            format!("{FERN_SYSTEM_PROMPT}\n\ncurrent memory:\n{memory}\n\n{ORCHESTRATOR_PROMPT}");
 
-        let mut tool_calls = 0usize;
+        let mut total_tool_calls = 0usize;
         loop {
-            let ai_response = self
+            let response = self
                 .cerebras
-                .chat(&system_prompt, history.clone())
+                .chat(&system_prompt, history.clone(), Some(tools_schema.clone()))
                 .await
                 .map_err(|err| format!("failed to run orchestrator model: {err}"))?;
+            let choice = response
+                .choices
+                .into_iter()
+                .next()
+                .ok_or_else(|| "model returned no choices".to_owned())?;
+            let message = choice.message;
+            let tool_calls = message.tool_calls.clone().unwrap_or_default();
 
-            match parse_response(&ai_response) {
-                OrchestratorAction::Respond(text) => {
+            if tool_calls.is_empty() {
+                let text = message
+                    .content
+                    .unwrap_or_else(|| "hmm i got an empty response, try again?".to_owned());
+                save_message(&self.db, user_id, room_id, "assistant", &text)
+                    .await
+                    .map_err(|err| format!("failed to save assistant message: {err}"))?;
+                return Ok(text);
+            }
+
+            if let Some(interim) = message.content.as_deref().map(str::trim) {
+                if !interim.is_empty() {
+                    if let Err(err) = send_fn(interim.to_owned()).await {
+                        tracing::warn!(error = %err, "failed to send interim orchestrator message");
+                    }
+                }
+            }
+
+            history.push(ChatMessage {
+                role: "assistant".to_owned(),
+                content: message.content,
+                tool_call_id: None,
+                tool_calls: Some(tool_calls.clone()),
+            });
+
+            for tool_call in tool_calls {
+                if total_tool_calls >= 5 {
+                    let text =
+                        "hmm i'm getting stuck in tool calls right now, try again in a sec 🌿"
+                            .to_owned();
                     save_message(&self.db, user_id, room_id, "assistant", &text)
                         .await
                         .map_err(|err| format!("failed to save assistant message: {err}"))?;
                     return Ok(text);
                 }
-                OrchestratorAction::CallTool {
-                    tool_name,
-                    params,
-                    interim_text,
-                } => {
-                    if let Some(interim) = interim_text {
-                        if let Err(err) = send_fn(interim).await {
-                            tracing::warn!(error = %err, "failed to send interim orchestrator message");
-                        }
-                    }
+                total_tool_calls += 1;
 
-                    if tool_calls >= 5 {
-                        let text =
-                            "hmm i'm getting stuck in tool calls right now, try again in a sec 🌿"
-                                .to_owned();
-                        save_message(&self.db, user_id, room_id, "assistant", &text)
-                            .await
-                            .map_err(|err| format!("failed to save assistant message: {err}"))?;
-                        return Ok(text);
-                    }
-                    tool_calls += 1;
+                let mut params = match serde_json::from_str::<serde_json::Value>(
+                    &tool_call.function.arguments,
+                ) {
+                    Ok(params) => params,
+                    Err(_) => json!({}),
+                };
 
-                    let Some(tool) = self.registry.get(&tool_name) else {
-                        let text = format!("hmm i couldn't find a tool named {tool_name}");
-                        save_message(&self.db, user_id, room_id, "assistant", &text)
-                            .await
-                            .map_err(|err| format!("failed to save assistant message: {err}"))?;
-                        return Ok(text);
-                    };
-
-                    match tool.execute(params).await {
-                        Ok(result) => history.push(ChatMessage {
-                            role: "system".to_owned(),
-                            content: format!("[tool:{tool_name} result] {result}"),
-                        }),
-                        Err(err) => {
-                            let text =
-                                format!("hmm the {tool_name} tool failed: {err}. try again?");
-                            save_message(&self.db, user_id, room_id, "assistant", &text)
-                                .await
-                                .map_err(|save_err| {
-                                    format!("failed to save assistant message: {save_err}")
-                                })?;
-                            return Ok(text);
-                        }
+                if tool_call.function.name == "set_reminder" {
+                    if let Some(map) = params.as_object_mut() {
+                        map.entry("user_id".to_owned())
+                            .or_insert_with(|| json!(user_id));
+                        map.entry("room_id".to_owned())
+                            .or_insert_with(|| json!(room_id));
                     }
                 }
+
+                let tool_result = if let Some(tool) = self.registry.get(&tool_call.function.name) {
+                    match tool.execute(params).await {
+                        Ok(result) => result,
+                        Err(err) => format!("error: {err}"),
+                    }
+                } else {
+                    format!("error: unknown tool {}", tool_call.function.name)
+                };
+
+                history.push(ChatMessage::tool(tool_call.id, tool_result));
             }
         }
     }
@@ -248,8 +261,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(DummyTool));
         let registry = Arc::new(registry);
-        let orchestrator =
-            Orchestrator::new(cerebras, Arc::clone(&registry), "./data".to_owned(), db);
+        let orchestrator = Orchestrator::new(cerebras, registry, "./data".to_owned(), db);
 
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
@@ -257,7 +269,14 @@ mod tests {
                 calls: Arc::new(AtomicUsize::new(0)),
                 first: json!({
                     "choices": [{
-                        "message": { "content": "<tool_call>{\"tool\":\"dummy_tool\",\"params\":{}}</tool_call>" }
+                        "message": {
+                            "content": "one sec",
+                            "tool_calls": [{
+                                "id": "call_1",
+                                "type": "function",
+                                "function": { "name": "dummy_tool", "arguments": "{}" }
+                            }]
+                        }
                     }]
                 }),
                 second: json!({
@@ -283,7 +302,9 @@ mod tests {
         assert!(requests.len() >= 2);
         let second_body =
             String::from_utf8(requests[1].body.clone()).expect("request body should be utf8");
-        assert!(second_body.contains("[tool:dummy_tool result] 42"));
+        assert!(second_body.contains("\"role\":\"tool\""));
+        assert!(second_body.contains("\"tool_call_id\":\"call_1\""));
+        assert!(second_body.contains("\"content\":\"42\""));
         assert_eq!(response, "final with tool context");
     }
 
@@ -306,13 +327,18 @@ mod tests {
                 calls: Arc::new(AtomicUsize::new(0)),
                 first: json!({
                     "choices": [{
-                        "message": { "content": "one sec\n<tool_call>{\"tool\":\"dummy_tool\",\"params\":{}}</tool_call>" }
+                        "message": {
+                            "content": "let me check",
+                            "tool_calls": [{
+                                "id": "call_1",
+                                "type": "function",
+                                "function": { "name": "dummy_tool", "arguments": "{}" }
+                            }]
+                        }
                     }]
                 }),
                 second: json!({
-                    "choices": [{
-                        "message": { "content": "done" }
-                    }]
+                    "choices": [{ "message": { "content": "done" } }]
                 }),
             })
             .mount(&server)
@@ -336,7 +362,7 @@ mod tests {
             .expect("process should succeed");
 
         let calls = sent.lock().expect("send lock should not be poisoned");
-        assert_eq!(calls.as_slice(), ["one sec"]);
+        assert_eq!(calls.as_slice(), ["let me check"]);
     }
 
     #[tokio::test]
@@ -356,7 +382,13 @@ mod tests {
             .and(path("/v1/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "choices": [{
-                    "message": { "content": "<tool_call>{\"tool\":\"dummy_tool\",\"params\":{}}</tool_call>" }
+                    "message": {
+                        "tool_calls": [{
+                            "id": "call_loop",
+                            "type": "function",
+                            "function": { "name": "dummy_tool", "arguments": "{}" }
+                        }]
+                    }
                 }]
             })))
             .mount(&server)
@@ -385,11 +417,25 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "choices": [{
-                    "message": { "content": "<tool_call>{\"tool\":\"missing_tool\",\"params\":{}}</tool_call>" }
-                }]
-            })))
+            .respond_with(SequenceResponder {
+                calls: Arc::new(AtomicUsize::new(0)),
+                first: json!({
+                    "choices": [{
+                        "message": {
+                            "tool_calls": [{
+                                "id": "call_missing",
+                                "type": "function",
+                                "function": { "name": "missing_tool", "arguments": "{}" }
+                            }]
+                        }
+                    }]
+                }),
+                second: json!({
+                    "choices": [{
+                        "message": { "content": "i couldn't run missing_tool" }
+                    }]
+                }),
+            })
             .mount(&server)
             .await;
 

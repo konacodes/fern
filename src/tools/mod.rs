@@ -5,6 +5,7 @@ pub mod time;
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use serde_json::json;
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -12,6 +13,34 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn parameters(&self) -> &str;
     async fn execute(&self, params: serde_json::Value) -> Result<String, String>;
+
+    fn tool_schema(&self) -> serde_json::Value {
+        let parameters = if self.parameters() == "none" {
+            json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+            })
+        } else {
+            json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": true
+            })
+        };
+
+        json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "strict": false,
+                "description": self.description(),
+                "parameters": parameters
+            }
+        })
+    }
 }
 
 pub struct ToolRegistry {
@@ -43,17 +72,20 @@ impl ToolRegistry {
         list
     }
 
-    pub fn build_tools_prompt(&self) -> String {
-        let mut lines = vec!["available tools:".to_owned(), String::new()];
-
-        for (name, description, params) in self.list() {
-            lines.push(format!("[{name}]"));
-            lines.push(format!("description: {description}"));
-            lines.push(format!("params: {params}"));
-            lines.push(String::new());
-        }
-
-        lines.join("\n")
+    pub fn build_tools_schema(&self) -> Vec<serde_json::Value> {
+        let mut tools = self
+            .tools
+            .values()
+            .map(|tool| tool.tool_schema())
+            .collect::<Vec<_>>();
+        tools.sort_by_key(|tool| {
+            tool.get("function")
+                .and_then(|func| func.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_owned()
+        });
+        tools
     }
 }
 
@@ -136,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn build_tools_prompt_includes_all() {
+    fn build_tools_schema_includes_all() {
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(DummyTool {
             name: "memory_read",
@@ -149,10 +181,12 @@ mod tests {
             parameters: "none",
         }));
 
-        let prompt = registry.build_tools_prompt();
-        assert!(prompt.contains("[memory_read]"));
-        assert!(prompt.contains("description: read memory"));
-        assert!(prompt.contains("[current_time]"));
-        assert!(prompt.contains("description: get time"));
+        let schema = registry.build_tools_schema();
+        let schema_text =
+            serde_json::to_string(&schema).expect("tools schema should serialize to json");
+        assert!(schema_text.contains("\"name\":\"memory_read\""));
+        assert!(schema_text.contains("\"description\":\"read memory\""));
+        assert!(schema_text.contains("\"name\":\"current_time\""));
+        assert!(schema_text.contains("\"description\":\"get time\""));
     }
 }

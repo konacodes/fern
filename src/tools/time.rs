@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::Local;
+use serde_json::json;
 
 use crate::tools::Tool;
 
@@ -17,6 +18,23 @@ impl Tool for CurrentTimeTool {
 
     fn parameters(&self) -> &str {
         "none"
+    }
+
+    fn tool_schema(&self) -> serde_json::Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "strict": true,
+                "description": self.description(),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": false
+                }
+            }
+        })
     }
 
     async fn execute(&self, _params: serde_json::Value) -> Result<String, String> {

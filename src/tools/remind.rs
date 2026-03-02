@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Local};
 use matrix_sdk::ruma::OwnedRoomId;
+use serde_json::json;
 use tokio::time::sleep;
 
 use crate::tools::Tool;
@@ -56,6 +57,32 @@ impl Tool for RemindTool {
 
     fn parameters(&self) -> &str {
         "message (string): what to remind about, delay_minutes (integer): how many minutes from now"
+    }
+
+    fn tool_schema(&self) -> serde_json::Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "strict": true,
+                "description": self.description(),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                            "description": "what to remind about"
+                        },
+                        "delay_minutes": {
+                            "type": "integer",
+                            "description": "how many minutes from now"
+                        }
+                    },
+                    "required": ["message", "delay_minutes"],
+                    "additionalProperties": false
+                }
+            }
+        })
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String, String> {

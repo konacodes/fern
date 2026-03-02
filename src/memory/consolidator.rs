@@ -68,15 +68,19 @@ impl Consolidator {
             .cerebras
             .chat(
                 CONSOLIDATION_PROMPT,
-                vec![ChatMessage {
-                    role: "user".to_owned(),
-                    content: user_message,
-                }],
+                vec![ChatMessage::new("user", user_message)],
+                None,
             )
             .await?;
+        let response_text = response
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|choice| choice.message.content)
+            .unwrap_or_default();
 
-        if response.starts_with("# Fern's Memory") {
-            write_memory(&self.data_dir, &response)?;
+        if response_text.starts_with("# Fern's Memory") {
+            write_memory(&self.data_dir, &response_text)?;
         } else {
             tracing::warn!("consolidation response invalid, keeping existing memory");
         }

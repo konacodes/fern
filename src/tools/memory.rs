@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde_json::json;
 
 use crate::{memory, tools::Tool};
 
@@ -24,6 +25,23 @@ impl Tool for MemoryReadTool {
 
     fn parameters(&self) -> &str {
         "none"
+    }
+
+    fn tool_schema(&self) -> serde_json::Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "strict": true,
+                "description": self.description(),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": false
+                }
+            }
+        })
     }
 
     async fn execute(&self, _params: serde_json::Value) -> Result<String, String> {
@@ -53,6 +71,28 @@ impl Tool for MemoryWriteTool {
 
     fn parameters(&self) -> &str {
         "content (string): the full updated memory.md content — must start with '# Fern's Memory' and preserve the 4-section structure"
+    }
+
+    fn tool_schema(&self) -> serde_json::Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "strict": true,
+                "description": self.description(),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "the full updated memory.md content"
+                        }
+                    },
+                    "required": ["content"],
+                    "additionalProperties": false
+                }
+            }
+        })
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String, String> {
