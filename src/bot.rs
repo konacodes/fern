@@ -108,6 +108,12 @@ impl FernBot {
                         MessageType::Text(text) => text.body.as_str(),
                         _ => return,
                     };
+                    tracing::info!(
+                        room_id = %room.room_id(),
+                        sender = %event.sender(),
+                        message = %text,
+                        "processing inbound text message"
+                    );
 
                     let response = if text.trim() == "/reset" {
                         match write_memory(&orchestrator.data_dir, MEMORY_TEMPLATE) {
@@ -153,14 +159,31 @@ impl FernBot {
                             }
                         }
                     };
+                    tracing::debug!(
+                        room_id = %room.room_id(),
+                        response = %response,
+                        "orchestrator returned response text"
+                    );
 
                     let chunks = split_message(&response, 500);
                     if chunks.is_empty() {
+                        tracing::warn!(room_id = %room.room_id(), "response split into zero chunks");
                         return;
                     }
+                    tracing::debug!(
+                        room_id = %room.room_id(),
+                        chunk_count = chunks.len(),
+                        "sending response chunks"
+                    );
 
                     let chunk_count = chunks.len();
                     for (idx, chunk) in chunks.into_iter().enumerate() {
+                        tracing::trace!(
+                            room_id = %room.room_id(),
+                            chunk_index = idx,
+                            chunk = %chunk,
+                            "sending response chunk"
+                        );
                         if let Err(err) =
                             room.send(RoomMessageEventContent::text_plain(chunk)).await
                         {

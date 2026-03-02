@@ -89,6 +89,10 @@ impl Tool for RemindTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String, String> {
+        tracing::debug!(
+            params = %params,
+            "set_reminder invoked"
+        );
         let message = params
             .get("message")
             .and_then(serde_json::Value::as_str)
@@ -172,6 +176,10 @@ async fn render_reminder_message(cerebras: &CerebrasClient, reminder_text: &str)
 send a short reminder message. keep it to one sentence, lowercase, and concise.";
     let user_prompt = format!("send this reminder now: {reminder_text}");
     let fallback = format!("🌿 reminder: {reminder_text}");
+    tracing::debug!(
+        reminder_text = %reminder_text,
+        "rendering reminder message with model"
+    );
 
     let response = match cerebras
         .chat(
@@ -203,11 +211,12 @@ pub async fn run_reminder_loop(
     client: matrix_sdk::Client,
     cerebras: Arc<CerebrasClient>,
 ) {
+    tracing::info!("reminder loop started");
     loop {
         sleep(std::time::Duration::from_secs(30)).await;
 
         let now = Local::now();
-        let due = {
+        let (due, pending_count_after_partition) = {
             let mut guard = match store.reminders.lock() {
                 Ok(guard) => guard,
                 Err(err) => {
@@ -215,14 +224,31 @@ pub async fn run_reminder_loop(
                     continue;
                 }
             };
+            let before_count = guard.len();
             let reminders = guard.drain(..).collect::<Vec<_>>();
             let (due, pending) = partition_due_reminders(reminders, now);
+            let due_count = due.len();
+            let pending_count = pending.len();
             *guard = pending;
-            due
+            tracing::trace!(
+                before_count,
+                due_count,
+                pending_count,
+                now = %now.to_rfc3339(),
+                "reminder loop partitioned reminders"
+            );
+            (due, pending_count)
         };
 
         let mut retries = Vec::new();
         for reminder in due {
+            tracing::debug!(
+                room_id = %reminder.room_id,
+                user_id = %reminder.user_id,
+                fire_at = %reminder.fire_at.to_rfc3339(),
+                message = %reminder.message,
+                "processing due reminder"
+            );
             let room_id: Result<OwnedRoomId, _> = reminder.room_id.as_str().try_into();
             let Ok(room_id) = room_id else {
                 tracing::warn!(room_id = %reminder.room_id, "invalid reminder room_id");
@@ -268,7 +294,19 @@ pub async fn run_reminder_loop(
                     continue;
                 }
             };
+            let retry_count = retries.len();
             guard.extend(retries);
+            tracing::warn!(
+                retry_count,
+                pending_count = guard.len(),
+                pending_count_after_partition,
+                "re-queued reminders after delivery failure"
+            );
+        } else {
+            tracing::trace!(
+                pending_count_after_partition,
+                "reminder loop iteration completed with no retries"
+            );
         }
     }
 }

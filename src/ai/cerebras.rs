@@ -95,6 +95,7 @@ impl CerebrasClient {
         let mut all_messages = Vec::with_capacity(messages.len() + 1);
         all_messages.push(ChatMessage::system(system));
         all_messages.extend(messages);
+        let tools_count = tools.as_ref().map_or(0, Vec::len);
 
         let request_body = ChatCompletionRequest {
             model: self.model.clone(),
@@ -104,6 +105,15 @@ impl CerebrasClient {
             parallel_tool_calls: tools.as_ref().map(|_| false),
             tools,
         };
+        tracing::debug!(
+            model = %self.model,
+            message_count = request_body.messages.len(),
+            tools_count,
+            "sending cerebras chat request"
+        );
+        if let Ok(serialized) = serde_json::to_string(&request_body) {
+            tracing::trace!(request = %truncate_for_log(&serialized, 4000), "cerebras request payload");
+        }
 
         let endpoint = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let response = self
@@ -116,15 +126,59 @@ impl CerebrasClient {
             .map_err(|err| format!("failed to call Cerebras API: {err}"))?;
 
         let status = response.status();
+        tracing::debug!(
+            model = %self.model,
+            status = %status.as_u16(),
+            "received cerebras chat response"
+        );
+        let body = response
+            .text()
+            .await
+            .map_err(|err| format!("failed reading Cerebras response body: {err}"))?;
+        tracing::trace!(
+            response_body = %truncate_for_log(&body, 4000),
+            "raw cerebras response body"
+        );
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
             return Err(format!("Cerebras API returned HTTP {}: {body}", status.as_u16()).into());
         }
 
-        response
-            .json::<ChatCompletionResponse>()
-            .await
-            .map_err(|err| format!("failed to parse Cerebras response JSON: {err}").into())
+        let parsed = serde_json::from_str::<ChatCompletionResponse>(&body).map_err(|err| {
+            tracing::error!(
+                error = %err,
+                response_body = %truncate_for_log(&body, 1000),
+                "failed to parse cerebras response json"
+            );
+            format!("failed to parse Cerebras response JSON: {err}")
+        })?;
+
+        let (tool_calls, has_content) = parsed
+            .choices
+            .first()
+            .map(|choice| {
+                (
+                    choice
+                        .message
+                        .tool_calls
+                        .as_ref()
+                        .map_or(0, std::vec::Vec::len),
+                    choice
+                        .message
+                        .content
+                        .as_ref()
+                        .map(|content| !content.trim().is_empty())
+                        .unwrap_or(false),
+                )
+            })
+            .unwrap_or((0, false));
+        tracing::debug!(
+            choices = parsed.choices.len(),
+            first_tool_calls = tool_calls,
+            first_has_content = has_content,
+            "parsed cerebras chat response"
+        );
+
+        Ok(parsed)
     }
 }
 
@@ -138,6 +192,14 @@ struct ChatCompletionRequest {
     parallel_tool_calls: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<serde_json::Value>>,
+}
+
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    let truncated = value.chars().take(max_chars).collect::<String>();
+    format!("{truncated}...[truncated]")
 }
 
 #[cfg(test)]

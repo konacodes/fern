@@ -41,6 +41,12 @@ impl Orchestrator {
         message: &str,
         send_fn: impl Fn(String) -> BoxFuture<'static, Result<(), String>>,
     ) -> Result<String, String> {
+        tracing::info!(
+            user_id,
+            room_id,
+            message = %truncate_for_log(message, 300),
+            "orchestrator received user message"
+        );
         upsert_user(&self.db, user_id, None)
             .await
             .map_err(|err| format!("failed to upsert user: {err}"))?;
@@ -58,11 +64,29 @@ impl Orchestrator {
 
         let memory = read_memory_file(&self.data_dir);
         let tools_schema = self.registry.build_tools_schema();
+        let tool_names = extract_tool_names(&tools_schema);
+        tracing::debug!(
+            room_id,
+            history_len = history.len(),
+            memory_chars = memory.len(),
+            tools_count = tools_schema.len(),
+            tools = %tool_names.join(","),
+            "orchestrator context prepared"
+        );
         let system_prompt =
             format!("{FERN_SYSTEM_PROMPT}\n\ncurrent memory:\n{memory}\n\n{ORCHESTRATOR_PROMPT}");
 
         let mut total_tool_calls = 0usize;
+        let mut loop_iteration = 0usize;
         loop {
+            loop_iteration += 1;
+            tracing::debug!(
+                room_id,
+                loop_iteration,
+                total_tool_calls,
+                history_len = history.len(),
+                "starting orchestrator model turn"
+            );
             let response = self
                 .cerebras
                 .chat(&system_prompt, history.clone(), Some(tools_schema.clone()))
@@ -75,22 +99,56 @@ impl Orchestrator {
                 .ok_or_else(|| "model returned no choices".to_owned())?;
             let message = choice.message;
             let tool_calls = message.tool_calls.clone().unwrap_or_default();
+            tracing::debug!(
+                room_id,
+                loop_iteration,
+                tool_calls = tool_calls.len(),
+                assistant_content = %truncate_for_log(message.content.as_deref().unwrap_or(""), 500),
+                "orchestrator model turn received"
+            );
 
             if tool_calls.is_empty() {
                 let text = message
                     .content
                     .unwrap_or_else(|| "hmm i got an empty response, try again?".to_owned());
+                if looks_like_json(&text) {
+                    tracing::warn!(
+                        room_id,
+                        loop_iteration,
+                        text = %truncate_for_log(&text, 600),
+                        "model returned json-like text with no tool_calls"
+                    );
+                }
                 save_message(&self.db, user_id, room_id, "assistant", &text)
                     .await
                     .map_err(|err| format!("failed to save assistant message: {err}"))?;
+                tracing::info!(
+                    room_id,
+                    loop_iteration,
+                    response = %truncate_for_log(&text, 300),
+                    "orchestrator returning final response"
+                );
                 return Ok(text);
             }
 
             if let Some(interim) = message.content.as_deref().map(str::trim) {
                 if should_send_interim(interim) {
+                    tracing::debug!(
+                        room_id,
+                        loop_iteration,
+                        interim = %truncate_for_log(interim, 300),
+                        "sending interim orchestrator message"
+                    );
                     if let Err(err) = send_fn(interim.to_owned()).await {
                         tracing::warn!(error = %err, "failed to send interim orchestrator message");
                     }
+                } else {
+                    tracing::debug!(
+                        room_id,
+                        loop_iteration,
+                        interim = %truncate_for_log(interim, 300),
+                        "skipping interim message because it appears to be structured payload"
+                    );
                 }
             }
 
@@ -112,12 +170,30 @@ impl Orchestrator {
                     return Ok(text);
                 }
                 total_tool_calls += 1;
+                tracing::info!(
+                    room_id,
+                    loop_iteration,
+                    total_tool_calls,
+                    tool_call_id = %tool_call.id,
+                    tool_name = %tool_call.function.name,
+                    raw_arguments = %truncate_for_log(&tool_call.function.arguments, 800),
+                    "executing tool call"
+                );
 
                 let mut params = match serde_json::from_str::<serde_json::Value>(
                     &tool_call.function.arguments,
                 ) {
                     Ok(params) => params,
-                    Err(_) => json!({}),
+                    Err(err) => {
+                        tracing::warn!(
+                            room_id,
+                            loop_iteration,
+                            error = %err,
+                            raw_arguments = %truncate_for_log(&tool_call.function.arguments, 800),
+                            "failed to parse tool arguments as json; defaulting to empty object"
+                        );
+                        json!({})
+                    }
                 };
 
                 if tool_call.function.name == "set_reminder" {
@@ -126,17 +202,46 @@ impl Orchestrator {
                             .or_insert_with(|| json!(user_id));
                         map.entry("room_id".to_owned())
                             .or_insert_with(|| json!(room_id));
+                        tracing::debug!(
+                            room_id,
+                            loop_iteration,
+                            tool_call_id = %tool_call.id,
+                            injected_user_id = user_id,
+                            injected_room_id = room_id,
+                            "injected reminder context into tool params"
+                        );
                     }
                 }
 
                 let tool_result = if let Some(tool) = self.registry.get(&tool_call.function.name) {
+                    tracing::debug!(
+                        room_id,
+                        loop_iteration,
+                        tool_call_id = %tool_call.id,
+                        tool_name = %tool_call.function.name,
+                        params = %truncate_for_log(&params.to_string(), 1000),
+                        "calling tool implementation"
+                    );
                     match tool.execute(params).await {
                         Ok(result) => result,
                         Err(err) => format!("error: {err}"),
                     }
                 } else {
+                    tracing::warn!(
+                        room_id,
+                        loop_iteration,
+                        tool_name = %tool_call.function.name,
+                        "tool not found in registry"
+                    );
                     format!("error: unknown tool {}", tool_call.function.name)
                 };
+                tracing::info!(
+                    room_id,
+                    loop_iteration,
+                    tool_call_id = %tool_call.id,
+                    tool_result = %truncate_for_log(&tool_result, 300),
+                    "tool execution finished"
+                );
 
                 history.push(ChatMessage::tool(tool_call.id, tool_result));
             }
@@ -163,6 +268,32 @@ fn should_send_interim(content: &str) -> bool {
     }
 
     true
+}
+
+fn looks_like_json(content: &str) -> bool {
+    let trimmed = content.trim();
+    (trimmed.starts_with('{') || trimmed.starts_with('['))
+        && serde_json::from_str::<serde_json::Value>(trimmed).is_ok()
+}
+
+fn extract_tool_names(schema: &[serde_json::Value]) -> Vec<String> {
+    schema
+        .iter()
+        .filter_map(|tool| {
+            tool.get("function")
+                .and_then(|func| func.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .collect()
+}
+
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    let truncated = value.chars().take(max_chars).collect::<String>();
+    format!("{truncated}...[truncated]")
 }
 
 #[cfg(test)]

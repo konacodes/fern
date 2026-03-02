@@ -55,10 +55,13 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
+        tracing::info!(tool = %tool.name(), "registering tool");
         self.tools.insert(tool.name().to_owned(), tool);
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
+        let found = self.tools.contains_key(name);
+        tracing::debug!(tool = name, found, "tool lookup");
         self.tools.get(name).map(|tool| tool.as_ref())
     }
 
@@ -85,6 +88,19 @@ impl ToolRegistry {
                 .unwrap_or("")
                 .to_owned()
         });
+        tracing::debug!(
+            tools_count = tools.len(),
+            tool_names = %tools
+                .iter()
+                .filter_map(|tool| {
+                    tool.get("function")
+                        .and_then(|func| func.get("name"))
+                        .and_then(serde_json::Value::as_str)
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+            "built tools schema"
+        );
         tools
     }
 }
