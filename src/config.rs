@@ -22,7 +22,7 @@ impl Config {
         let cerebras_api_key = required_var("CEREBRAS_API_KEY");
         let data_dir = env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_owned());
         let cerebras_model =
-            env::var("CEREBRAS_MODEL").unwrap_or_else(|_| "qwen-3-235b".to_owned());
+            env::var("CEREBRAS_MODEL").unwrap_or_else(|_| "llama3.1-8b".to_owned());
         let cerebras_base_url = env::var("CEREBRAS_BASE_URL")
             .unwrap_or_else(|_| "https://api.cerebras.ai/v1".to_owned());
         let database_url =

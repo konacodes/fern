@@ -87,7 +87,7 @@ impl Orchestrator {
             }
 
             if let Some(interim) = message.content.as_deref().map(str::trim) {
-                if !interim.is_empty() {
+                if should_send_interim(interim) {
                     if let Err(err) = send_fn(interim.to_owned()).await {
                         tracing::warn!(error = %err, "failed to send interim orchestrator message");
                     }
@@ -147,6 +147,22 @@ impl Orchestrator {
 fn read_memory_file(data_dir: &str) -> String {
     let path = Path::new(data_dir).join("memory.md");
     std::fs::read_to_string(path).unwrap_or_default()
+}
+
+fn should_send_interim(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Some models emit raw JSON alongside tool_calls. Don't leak that to users.
+    if (trimmed.starts_with('{') || trimmed.starts_with('['))
+        && serde_json::from_str::<serde_json::Value>(trimmed).is_ok()
+    {
+        return false;
+    }
+
+    true
 }
 
 #[cfg(test)]
@@ -366,6 +382,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_skips_json_interim_message() {
+        let server = MockServer::start().await;
+        let config = test_config(format!("{}/v1", server.uri()));
+        let cerebras = Arc::new(CerebrasClient::new(&config));
+        let db = init_db("sqlite::memory:")
+            .await
+            .expect("db init should succeed");
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(DummyTool));
+        let registry = Arc::new(registry);
+        let orchestrator = Orchestrator::new(cerebras, registry, "./data".to_owned(), db);
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(SequenceResponder {
+                calls: Arc::new(AtomicUsize::new(0)),
+                first: json!({
+                    "choices": [{
+                        "message": {
+                            "content": "{\"type\":\"set_reminder\",\"delay_minutes\":1,\"message\":\"eat lunch\"}",
+                            "tool_calls": [{
+                                "id": "call_1",
+                                "type": "function",
+                                "function": { "name": "dummy_tool", "arguments": "{}" }
+                            }]
+                        }
+                    }]
+                }),
+                second: json!({
+                    "choices": [{ "message": { "content": "done" } }]
+                }),
+            })
+            .mount(&server)
+            .await;
+
+        let sent = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sent_for_callback = Arc::clone(&sent);
+
+        let _ = orchestrator
+            .process_message("user", "room", "question", move |message| {
+                let sent_for_callback = Arc::clone(&sent_for_callback);
+                Box::pin(async move {
+                    sent_for_callback
+                        .lock()
+                        .expect("send lock should not be poisoned")
+                        .push(message);
+                    Ok(())
+                })
+            })
+            .await
+            .expect("process should succeed");
+
+        let calls = sent.lock().expect("send lock should not be poisoned");
+        assert!(
+            calls.is_empty(),
+            "json-formatted interim content should be filtered out"
+        );
+    }
+
+    #[tokio::test]
     async fn process_max_tool_calls() {
         let server = MockServer::start().await;
         let config = test_config(format!("{}/v1", server.uri()));
@@ -447,5 +523,15 @@ mod tests {
             .expect("process should return graceful message");
 
         assert!(response.contains("missing_tool"));
+    }
+
+    #[test]
+    fn should_send_interim_filters_json() {
+        assert!(!super::should_send_interim(
+            "{\"type\":\"set_reminder\",\"delay_minutes\":1,\"message\":\"eat lunch\"}"
+        ));
+        assert!(!super::should_send_interim("  [1,2,3]  "));
+        assert!(!super::should_send_interim("  "));
+        assert!(super::should_send_interim("let me check that"));
     }
 }

@@ -95,7 +95,7 @@ mod tests {
             bot_password: "password".to_owned(),
             data_dir: "./data".to_owned(),
             cerebras_api_key: "test-key".to_owned(),
-            cerebras_model: "qwen-3-235b".to_owned(),
+            cerebras_model: "llama3.1-8b".to_owned(),
             cerebras_base_url: base_url,
             database_url: "sqlite::memory:".to_owned(),
         }
@@ -192,7 +192,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
             .and(body_json(json!({
-                "model": "qwen-3-235b",
+                "model": "llama3.1-8b",
                 "messages": [
                     { "role": "system", "content": super::FERN_SYSTEM_PROMPT },
                     { "role": "user", "content": "earlier user" },

@@ -58,7 +58,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tokio::spawn(run_nightly_loop(Arc::clone(&consolidator)));
 
     let bot = FernBot::new(config, orchestrator).await?;
-    tokio::spawn(run_reminder_loop(reminder_store, bot.client.clone()));
+    tokio::spawn(run_reminder_loop(
+        reminder_store,
+        bot.client.clone(),
+        Arc::clone(&orchestrator_cerebras),
+    ));
     bot.run().await?;
     Ok(())
 }
