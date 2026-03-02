@@ -30,7 +30,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     std::fs::create_dir_all(&config.data_dir)?;
     let db = db::init_db(&config.database_url).await?;
 
-    let cerebras = Arc::new(CerebrasClient::new(&config));
+    let mut orchestrator_config = config.clone();
+    orchestrator_config.cerebras_model = "gpt-oss-120b".to_owned();
+    let orchestrator_cerebras = Arc::new(CerebrasClient::new(&orchestrator_config));
+    let consolidator_cerebras = Arc::new(CerebrasClient::new(&config));
     let reminder_store = ReminderStore::new();
 
     let mut registry = ToolRegistry::new();
@@ -41,13 +44,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let registry = Arc::new(registry);
 
     let orchestrator = Arc::new(Orchestrator::new(
-        Arc::clone(&cerebras),
+        Arc::clone(&orchestrator_cerebras),
         Arc::clone(&registry),
         config.data_dir.clone(),
         db.clone(),
     ));
     let consolidator = Arc::new(Consolidator::new(
-        Arc::clone(&cerebras),
+        Arc::clone(&consolidator_cerebras),
         db.clone(),
         config.data_dir.clone(),
     ));
