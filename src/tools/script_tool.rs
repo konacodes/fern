@@ -16,8 +16,13 @@ pub struct ScriptTool {
 
 impl ScriptTool {
     pub fn new(def: DynamicToolDef, data_dir: String) -> Result<Self, String> {
-        match def.tool_type {
-            DynamicToolType::Script { .. } => Ok(Self { def, data_dir }),
+        match &def.tool_type {
+            DynamicToolType::Script { interpreter, .. } => {
+                if !interpreter_available(interpreter) {
+                    return Err(format!("script interpreter not available: {interpreter}"));
+                }
+                Ok(Self { def, data_dir })
+            }
             _ => Err("script tool requires Script dynamic tool type".to_owned()),
         }
     }
@@ -161,6 +166,15 @@ pub fn validate_script_source(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn interpreter_available(interpreter: &str) -> bool {
+    std::process::Command::new(interpreter)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::Command as StdCommand;
@@ -177,6 +191,14 @@ mod tests {
 
     fn has_python3() -> bool {
         StdCommand::new("python3")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    fn has_bash() -> bool {
+        StdCommand::new("bash")
             .arg("--version")
             .output()
             .map(|output| output.status.success())
@@ -237,6 +259,11 @@ mod tests {
 
     #[tokio::test]
     async fn script_tool_runs_bash() {
+        if !has_bash() {
+            eprintln!("skipping test: bash not available");
+            return;
+        }
+
         let dir = tempdir().expect("tempdir should be created");
         let tool = ScriptTool::new(
             sample_bash_tool("echo hello-from-bash"),
@@ -365,5 +392,31 @@ mod tests {
             .map(|iter| iter.count())
             .unwrap_or(0);
         assert_eq!(files, 0, "expected no leftover temp scripts");
+    }
+
+    #[test]
+    fn script_tool_rejects_missing_interpreter() {
+        let dir = tempdir().expect("tempdir should be created");
+        let def = DynamicToolDef {
+            name: "missing_interp".to_owned(),
+            description: "missing interpreter".to_owned(),
+            parameters: vec![ToolParam {
+                name: "text".to_owned(),
+                param_type: "string".to_owned(),
+                description: "input".to_owned(),
+                required: true,
+            }],
+            tool_type: DynamicToolType::Script {
+                interpreter: "definitely_not_a_real_interpreter_12345".to_owned(),
+                source: "print('x')".to_owned(),
+            },
+        };
+
+        let err = ScriptTool::new(def, dir.path().to_str().expect("utf-8 path").to_owned())
+            .expect_err("missing interpreter should fail");
+        assert!(
+            err.contains("interpreter"),
+            "expected interpreter availability error, got: {err}"
+        );
     }
 }

@@ -3,7 +3,9 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 
 use crate::tools::{
-    dynamic::DynamicToolType, generator::ToolGenerator, http_tool::HttpTool,
+    dynamic::{delete_tool, DynamicToolType},
+    generator::ToolGenerator,
+    http_tool::HttpTool,
     script_tool::ScriptTool, Tool, ToolRegistry,
 };
 
@@ -71,26 +73,54 @@ impl Tool for RequestToolTool {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| "missing required param: description".to_owned())?;
 
-        let def = self.generator.generate_tool(description).await?;
-        let tool_name = def.name.clone();
-        let tool_description = def.description.clone();
+        let mut generation_request = description.to_owned();
+        for attempt in 0..2 {
+            let def = self.generator.generate_tool(&generation_request).await?;
+            let tool_name = def.name.clone();
+            let tool_description = def.description.clone();
 
-        let tool: Box<dyn Tool> = match &def.tool_type {
-            DynamicToolType::Http { .. } => Box::new(HttpTool::new(def)?),
-            DynamicToolType::Script { .. } => {
-                Box::new(ScriptTool::new(def, self.data_dir.clone())?)
-            }
-        };
+            let tool: Result<Box<dyn Tool>, String> = match &def.tool_type {
+                DynamicToolType::Http { .. } => {
+                    HttpTool::new(def.clone()).map(|tool| Box::new(tool) as Box<dyn Tool>)
+                }
+                DynamicToolType::Script { .. } => {
+                    ScriptTool::new(def.clone(), self.data_dir.clone())
+                        .map(|tool| Box::new(tool) as Box<dyn Tool>)
+                }
+            };
 
-        let mut registry = self
-            .registry
-            .write()
-            .map_err(|_| "failed to acquire tool registry write lock".to_owned())?;
-        registry.register(tool);
+            let tool = match tool {
+                Ok(tool) => tool,
+                Err(err) => {
+                    let _ = delete_tool(&self.data_dir, &tool_name);
+                    let interpreter_unavailable = err.contains("interpreter not available");
+                    if interpreter_unavailable && attempt == 0 {
+                        tracing::warn!(
+                            tool = %tool_name,
+                            error = %err,
+                            "generated script tool cannot run; retrying generation with http-only constraint"
+                        );
+                        generation_request = format!(
+                            "{description}\n\nIMPORTANT: script interpreters are unavailable in this runtime. generate an HTTP tool only."
+                        );
+                        continue;
+                    }
+                    return Err(err);
+                }
+            };
 
-        Ok(format!(
-            "new tool '{tool_name}' created and ready to use: {tool_description}. you can now call it."
-        ))
+            let mut registry = self
+                .registry
+                .write()
+                .map_err(|_| "failed to acquire tool registry write lock".to_owned())?;
+            registry.register(tool);
+
+            return Ok(format!(
+                "new tool '{tool_name}' created and ready to use: {tool_description}. you can now call it."
+            ));
+        }
+
+        Err("failed to generate a usable tool".to_owned())
     }
 }
 
