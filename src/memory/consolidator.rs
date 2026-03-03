@@ -6,7 +6,7 @@ use sqlx::SqlitePool;
 use crate::{
     ai::cerebras::{CerebrasClient, ChatMessage},
     db::messages::{get_messages_since, StoredMessage},
-    memory::{read_memory, write_memory},
+    memory::{read_behaviors, read_memory, write_memory},
 };
 
 pub const CONSOLIDATION_PROMPT: &str = r##"you maintain a memory file for fern, a personal assistant. you've been given today's chat log and the current memory file.
@@ -26,6 +26,7 @@ rules:
 - don't add trivial things ("user said hi")
 - write in lowercase, casual tone (matching fern's voice)
 - always start the file with "# Fern's Memory" on the first line
+- you will also receive fern's current behaviors file. if any behavioral patterns seem stale, outdated, or contradicted by recent conversations, note them for removal. but do NOT rewrite behaviors.md — only update memory.md.
 
 respond with ONLY the updated memory file contents. no explanation, no code fences, no preamble."##;
 
@@ -46,6 +47,7 @@ impl Consolidator {
 
     pub async fn run_consolidation(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let memory = read_memory(&self.data_dir);
+        let behaviors = read_behaviors(&self.data_dir);
         let now = Local::now();
         let midnight_naive = now
             .date_naive()
@@ -63,7 +65,9 @@ impl Consolidator {
         }
 
         let chat_log = format_chat_log(&messages);
-        let user_message = format!("current memory:\n{memory}\n\nchat log:\n{chat_log}");
+        let user_message = format!(
+            "current memory:\n{memory}\n\ncurrent behaviors:\n{behaviors}\n\nchat log:\n{chat_log}"
+        );
         let response = self
             .cerebras
             .chat(
@@ -151,7 +155,7 @@ mod tests {
             init_db,
             messages::{get_messages_since, save_message, upsert_user},
         },
-        memory::{read_memory, write_memory},
+        memory::{read_behaviors, read_memory, write_behaviors, write_memory},
     };
 
     use super::{duration_until_next_midnight, format_chat_log, Consolidator};
@@ -326,6 +330,112 @@ mod tests {
 
         let memory = read_memory(&data_dir);
         assert_eq!(memory, initial);
+    }
+
+    #[tokio::test]
+    async fn consolidation_receives_behaviors() {
+        let server = MockServer::start().await;
+        let config = test_config(format!("{}/v1", server.uri()));
+        let cerebras = Arc::new(CerebrasClient::new(&config));
+        let db = init_db("sqlite::memory:")
+            .await
+            .expect("db init should succeed");
+        let dir = tempdir().expect("tempdir should be created");
+        let data_dir = dir.path().to_string_lossy().to_string();
+        upsert_user(&db, "@alice:example.org", Some("Alice"))
+            .await
+            .expect("upsert should succeed");
+        save_message(
+            &db,
+            "@alice:example.org",
+            "!room:example.org",
+            "user",
+            "hey",
+        )
+        .await
+        .expect("save should succeed");
+        write_memory(
+            &data_dir,
+            "# Fern's Memory\n\n## Working Memory\n- (empty)\n\n## Projects & Work\n- (empty)\n\n## Preferences & Style\n- (empty)\n\n## Long-Term Memory\n- (empty)",
+        )
+        .expect("memory write should succeed");
+        let behaviors = "# Fern's Learned Behaviors\n\n## General\n- include sources for news";
+        write_behaviors(&data_dir, behaviors).expect("behaviors write should succeed");
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{ "message": { "content": "# Fern's Memory\n\n## Working Memory\n- updated\n\n## Projects & Work\n- (empty)\n\n## Preferences & Style\n- (empty)\n\n## Long-Term Memory\n- (empty)" } }]
+            })))
+            .mount(&server)
+            .await;
+
+        let consolidator = Consolidator::new(cerebras, db, data_dir);
+        consolidator
+            .run_consolidation()
+            .await
+            .expect("consolidation should succeed");
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("requests should be available");
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("request body should parse");
+        let prompt = body
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|messages| messages.get(1))
+            .and_then(|message| message.get("content"))
+            .and_then(serde_json::Value::as_str)
+            .expect("user content should be present");
+        assert!(prompt.contains("include sources for news"));
+    }
+
+    #[tokio::test]
+    async fn consolidation_still_only_writes_memory() {
+        let server = MockServer::start().await;
+        let config = test_config(format!("{}/v1", server.uri()));
+        let cerebras = Arc::new(CerebrasClient::new(&config));
+        let db = init_db("sqlite::memory:")
+            .await
+            .expect("db init should succeed");
+        let dir = tempdir().expect("tempdir should be created");
+        let data_dir = dir.path().to_string_lossy().to_string();
+        upsert_user(&db, "@alice:example.org", Some("Alice"))
+            .await
+            .expect("upsert should succeed");
+        save_message(
+            &db,
+            "@alice:example.org",
+            "!room:example.org",
+            "user",
+            "hey",
+        )
+        .await
+        .expect("save should succeed");
+        let initial_memory = "# Fern's Memory\n\n## Working Memory\n- (empty)\n\n## Projects & Work\n- (empty)\n\n## Preferences & Style\n- (empty)\n\n## Long-Term Memory\n- (empty)";
+        write_memory(&data_dir, initial_memory).expect("memory write should succeed");
+        let initial_behaviors =
+            "# Fern's Learned Behaviors\n\n## Tool Usage\n- use search_tools first";
+        write_behaviors(&data_dir, initial_behaviors).expect("behaviors write should succeed");
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{ "message": { "content": "# Fern's Memory\n\n## Working Memory\n- updated\n\n## Projects & Work\n- (empty)\n\n## Preferences & Style\n- (empty)\n\n## Long-Term Memory\n- (empty)" } }]
+            })))
+            .mount(&server)
+            .await;
+
+        let consolidator = Consolidator::new(cerebras, db, data_dir.clone());
+        consolidator
+            .run_consolidation()
+            .await
+            .expect("consolidation should succeed");
+
+        let saved_behaviors = read_behaviors(&data_dir);
+        assert_eq!(saved_behaviors, initial_behaviors);
     }
 
     #[tokio::test]

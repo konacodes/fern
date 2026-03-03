@@ -59,6 +59,18 @@ rules:
 
 respond with ONLY the JSON. nothing else."#;
 
+pub const TOOL_IMPROVEMENT_PROMPT: &str = r#"you are improving an existing tool for fern, a personal assistant chatbot.
+
+here is the current tool definition:
+{existing_json}
+
+the user/fern reported this problem:
+{feedback}
+
+generate an improved version. respond with ONLY the complete JSON tool definition (same format as the original). fix the reported issue. keep the same tool name.
+
+respond with ONLY the JSON. nothing else."#;
+
 pub struct ToolGenerator {
     anthropic: Arc<AnthropicClient>,
     data_dir: String,
@@ -86,6 +98,29 @@ impl ToolGenerator {
             validate_script_source(source)?;
         }
         def.save(&self.data_dir)?;
+        Ok(def)
+    }
+
+    pub async fn improve_tool(
+        &self,
+        existing_def: &str,
+        feedback: &str,
+    ) -> Result<DynamicToolDef, String> {
+        let user_prompt = format!(
+            "here is the current tool definition:\n{existing_def}\n\nthe user/fern reported this problem:\n{feedback}"
+        );
+        let raw = self
+            .anthropic
+            .complete(TOOL_IMPROVEMENT_PROMPT, &user_prompt)
+            .await
+            .map_err(|err| format!("tool improvement request failed: {err}"))?;
+        let cleaned = strip_markdown_fences(&raw);
+        let def = serde_json::from_str::<DynamicToolDef>(&cleaned)
+            .map_err(|err| format!("failed parsing improved tool json: {err}"))?;
+        validate_tool_def(&def)?;
+        if let DynamicToolType::Script { source, .. } = &def.tool_type {
+            validate_script_source(source)?;
+        }
         Ok(def)
     }
 }

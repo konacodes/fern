@@ -6,11 +6,17 @@ use fern::{
     memory::consolidator::{run_nightly_loop, Consolidator},
     orchestrator::engine::Orchestrator,
     tools::{
+        delete::DeleteToolTool,
         generator::ToolGenerator,
+        improve::ImproveToolTool,
         loader::load_and_register_tools,
         memory::{MemoryReadTool, MemoryWriteTool},
+        personality::{
+            BehaviorsReadTool, BehaviorsWriteTool, PersonalityReadTool, PersonalityWriteTool,
+        },
         remind::{run_reminder_loop, RemindTool, ReminderStore},
         request_tool::RequestToolTool,
+        search::SearchToolsTool,
         time::CurrentTimeTool,
         ToolRegistry,
     },
@@ -47,33 +53,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let consolidator_cerebras = Arc::new(CerebrasClient::new(&config));
     let reminder_store = ReminderStore::new();
 
-    let mut registry = ToolRegistry::new();
-    registry.register(Box::new(MemoryReadTool::new(config.data_dir.clone())));
-    registry.register(Box::new(MemoryWriteTool::new(config.data_dir.clone())));
-    registry.register(Box::new(CurrentTimeTool));
-    registry.register(Box::new(RemindTool::new(reminder_store.clone())));
-    load_and_register_tools(&config.data_dir, &mut registry);
-    let registry = Arc::new(RwLock::new(registry));
-    tracing::info!("tool registry initialized with static + dynamic tools");
-
     let anthropic = config.anthropic_api_key.as_ref().map(|api_key| {
         Arc::new(AnthropicClient::new(
             api_key.clone(),
             config.anthropic_model.clone(),
         ))
     });
-    if let Some(anthropic) = anthropic {
+    let generator =
+        anthropic.map(|client| Arc::new(ToolGenerator::new(client, config.data_dir.clone())));
+    if generator.is_some() {
         tracing::info!(model = %config.anthropic_model, "anthropic tool generation enabled");
-        let generator = Arc::new(ToolGenerator::new(anthropic, config.data_dir.clone()));
-        let request_tool =
-            RequestToolTool::new(generator, Arc::clone(&registry), config.data_dir.clone());
-        let mut guard = registry
-            .write()
-            .map_err(|_| std::io::Error::other("failed to acquire tool registry write lock"))?;
-        guard.register(Box::new(request_tool));
     } else {
         tracing::info!("anthropic api key not set; request_tool is disabled");
     }
+    let registry =
+        build_registry_for_test(config.data_dir.clone(), reminder_store.clone(), generator)?;
+    tracing::info!("tool registry initialized with static + dynamic tools");
 
     let orchestrator = Arc::new(Orchestrator::new(
         Arc::clone(&orchestrator_cerebras),
@@ -103,8 +98,145 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
+fn build_registry_for_test(
+    data_dir: String,
+    reminder_store: ReminderStore,
+    generator: Option<Arc<ToolGenerator>>,
+) -> Result<Arc<RwLock<ToolRegistry>>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut registry = ToolRegistry::new();
+    registry.register_builtin(Box::new(MemoryReadTool::new(data_dir.clone())));
+    registry.register_builtin(Box::new(MemoryWriteTool::new(data_dir.clone())));
+    registry.register_builtin(Box::new(PersonalityReadTool::new(data_dir.clone())));
+    registry.register_builtin(Box::new(PersonalityWriteTool::new(data_dir.clone())));
+    registry.register_builtin(Box::new(BehaviorsReadTool::new(data_dir.clone())));
+    registry.register_builtin(Box::new(BehaviorsWriteTool::new(data_dir.clone())));
+    registry.register_builtin(Box::new(CurrentTimeTool));
+    registry.register_builtin(Box::new(RemindTool::new(reminder_store)));
+    load_and_register_tools(&data_dir, &mut registry);
+    let registry = Arc::new(RwLock::new(registry));
+
+    {
+        let mut guard = registry
+            .write()
+            .map_err(|_| std::io::Error::other("failed to acquire tool registry write lock"))?;
+        guard.register_builtin(Box::new(SearchToolsTool::new(Arc::clone(&registry))));
+        guard.register_builtin(Box::new(DeleteToolTool::new(
+            Arc::clone(&registry),
+            data_dir.clone(),
+        )));
+    }
+
+    if let Some(generator) = generator {
+        let mut guard = registry
+            .write()
+            .map_err(|_| std::io::Error::other("failed to acquire tool registry write lock"))?;
+        guard.register_builtin(Box::new(RequestToolTool::new(
+            Arc::clone(&generator),
+            Arc::clone(&registry),
+            data_dir.clone(),
+        )));
+        guard.register_builtin(Box::new(ImproveToolTool::new(
+            generator,
+            Arc::clone(&registry),
+            data_dir,
+        )));
+    }
+
+    Ok(registry)
+}
+
 fn init_tracing() {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("fern=trace,matrix_sdk=info,sqlx=warn,reqwest=warn"));
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tempfile::tempdir;
+
+    use fern::{
+        ai::anthropic::AnthropicClient,
+        tools::{generator::ToolGenerator, remind::ReminderStore},
+    };
+
+    use super::build_registry_for_test;
+
+    #[test]
+    fn all_new_tools_registered() {
+        let dir = tempdir().expect("tempdir should be created");
+        let anthropic = Arc::new(AnthropicClient::with_base_url(
+            "anthropic-key",
+            "claude-sonnet-4-20250514",
+            "http://localhost",
+        ));
+        let generator = Arc::new(ToolGenerator::new(
+            anthropic,
+            dir.path().to_string_lossy().to_string(),
+        ));
+
+        let registry = build_registry_for_test(
+            dir.path().to_string_lossy().to_string(),
+            ReminderStore::new(),
+            Some(generator),
+        )
+        .expect("registry should build");
+        let guard = registry
+            .read()
+            .expect("registry lock should not be poisoned");
+
+        for name in [
+            "personality_read",
+            "personality_write",
+            "behaviors_read",
+            "behaviors_write",
+            "search_tools",
+            "improve_tool",
+            "delete_tool",
+            "request_tool",
+        ] {
+            assert!(
+                guard.get(name).is_some(),
+                "expected tool to be registered: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_tools_are_builtin() {
+        let dir = tempdir().expect("tempdir should be created");
+        let anthropic = Arc::new(AnthropicClient::with_base_url(
+            "anthropic-key",
+            "claude-sonnet-4-20250514",
+            "http://localhost",
+        ));
+        let generator = Arc::new(ToolGenerator::new(
+            anthropic,
+            dir.path().to_string_lossy().to_string(),
+        ));
+
+        let registry = build_registry_for_test(
+            dir.path().to_string_lossy().to_string(),
+            ReminderStore::new(),
+            Some(generator),
+        )
+        .expect("registry should build");
+        let guard = registry
+            .read()
+            .expect("registry lock should not be poisoned");
+
+        for name in [
+            "search_tools",
+            "improve_tool",
+            "delete_tool",
+            "personality_read",
+            "personality_write",
+            "behaviors_read",
+            "behaviors_write",
+        ] {
+            assert!(guard.is_builtin(name), "expected built-in tool: {name}");
+        }
+    }
 }

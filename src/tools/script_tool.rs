@@ -9,6 +9,7 @@ use crate::tools::{
     Tool,
 };
 
+#[derive(Debug)]
 pub struct ScriptTool {
     def: DynamicToolDef,
     data_dir: String,

@@ -5,27 +5,10 @@ use sqlx::SqlitePool;
 use crate::{
     ai::cerebras::{CerebrasClient, ChatMessage},
     db::messages::{get_recent_messages, save_message, upsert_user},
+    memory::PERSONALITY_TEMPLATE,
 };
 
 pub type EngineResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
-
-pub const FERN_SYSTEM_PROMPT: &str = r#"you're fern 🌿 — a warm, witty personal assistant who lives in your texts.
-
-personality:
-- lowercase casual. no periods at end of messages unless it's dramatic
-- brief — 1-3 sentences usually. you're texting, not writing essays
-- warm but not sycophantic. you care genuinely
-- playful when the moment calls for it
-- you remember what people tell you (when memory is available)
-- you admit when you don't know something
-
-rules:
-- never start with "Hey!" or "Hi there!" — just dive in
-- never use bullet points or markdown formatting in messages
-- never say "as an AI" or "I'm just a language model"
-- keep responses under 300 characters when possible
-- if a response needs to be longer, that's fine, but prefer brevity
-- use emoji sparingly — 🌿 is your signature but don't overdo it"#;
 
 pub struct ConversationEngine {
     pub cerebras: Arc<CerebrasClient>,
@@ -52,7 +35,11 @@ impl ConversationEngine {
             .map(|stored| ChatMessage::new(stored.role, stored.content))
             .collect::<Vec<_>>();
 
-        let response = match self.cerebras.chat(FERN_SYSTEM_PROMPT, history, None).await {
+        let response = match self
+            .cerebras
+            .chat(PERSONALITY_TEMPLATE, history, None)
+            .await
+        {
             Ok(response) => response
                 .choices
                 .into_iter()
@@ -196,7 +183,7 @@ mod tests {
             .and(body_json(json!({
                 "model": "llama3.1-8b",
                 "messages": [
-                    { "role": "system", "content": super::FERN_SYSTEM_PROMPT },
+                    { "role": "system", "content": crate::memory::PERSONALITY_TEMPLATE },
                     { "role": "user", "content": "earlier user" },
                     { "role": "assistant", "content": "earlier assistant" },
                     { "role": "user", "content": "latest input" }

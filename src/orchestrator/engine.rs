@@ -1,5 +1,5 @@
 use std::{
-    path::Path,
+    collections::HashSet,
     sync::{Arc, RwLock},
 };
 
@@ -10,7 +10,7 @@ use sqlx::SqlitePool;
 use crate::{
     ai::cerebras::{CerebrasClient, ChatMessage},
     db::messages::{get_recent_messages, save_message, upsert_user},
-    engine::conversation::FERN_SYSTEM_PROMPT,
+    memory::{read_behaviors, read_memory, read_personality},
     orchestrator::ORCHESTRATOR_PROMPT,
     tools::ToolRegistry,
 };
@@ -65,19 +65,33 @@ impl Orchestrator {
             .map(|stored| ChatMessage::new(stored.role, stored.content))
             .collect::<Vec<_>>();
 
-        let memory = read_memory_file(&self.data_dir);
-        let system_prompt =
-            format!("{FERN_SYSTEM_PROMPT}\n\ncurrent memory:\n{memory}\n\n{ORCHESTRATOR_PROMPT}");
+        let personality = read_personality(&self.data_dir);
+        let memory = read_memory(&self.data_dir);
+        let behaviors = read_behaviors(&self.data_dir);
+        let system_prompt = format!(
+            "{personality}\n\ncurrent memory:\n{memory}\n\nlearned behaviors:\n{behaviors}\n\n{ORCHESTRATOR_PROMPT}"
+        );
 
         let mut total_tool_calls = 0usize;
         let mut loop_iteration = 0usize;
+        let mut discovered_tool_names = HashSet::<String>::new();
         loop {
             loop_iteration += 1;
-            let tools_schema = self
-                .registry
-                .read()
-                .map_err(|_| "failed to acquire tool registry read lock".to_owned())?
-                .build_tools_schema();
+            let tools_schema = {
+                let registry = self
+                    .registry
+                    .read()
+                    .map_err(|_| "failed to acquire tool registry read lock".to_owned())?;
+                let mut schemas = registry.get_always_available_schemas();
+                if !discovered_tool_names.is_empty() {
+                    let discovered = discovered_tool_names
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>();
+                    schemas.extend(registry.get_schemas_by_names(&discovered));
+                }
+                dedupe_tool_schemas(schemas)
+            };
             let tool_names = extract_tool_names(&tools_schema);
             tracing::debug!(
                 room_id,
@@ -162,7 +176,7 @@ impl Orchestrator {
             });
 
             for tool_call in tool_calls {
-                if total_tool_calls >= 8 {
+                if total_tool_calls >= 10 {
                     let text =
                         "hmm i'm getting stuck in tool calls right now, try again in a sec 🌿"
                             .to_owned();
@@ -250,15 +264,25 @@ impl Orchestrator {
                     "tool execution finished"
                 );
 
+                if tool_call.function.name == "search_tools" {
+                    let discovered_names = parse_search_tool_names(&tool_result);
+                    if !discovered_names.is_empty() {
+                        let registry = self
+                            .registry
+                            .read()
+                            .map_err(|_| "failed to acquire tool registry read lock".to_owned())?;
+                        for name in discovered_names {
+                            if registry.get(&name).is_some() && !registry.is_builtin(&name) {
+                                discovered_tool_names.insert(name);
+                            }
+                        }
+                    }
+                }
+
                 history.push(ChatMessage::tool(tool_call.id, tool_result));
             }
         }
     }
-}
-
-fn read_memory_file(data_dir: &str) -> String {
-    let path = Path::new(data_dir).join("memory.md");
-    std::fs::read_to_string(path).unwrap_or_default()
 }
 
 fn should_send_interim(content: &str) -> bool {
@@ -295,6 +319,36 @@ fn extract_tool_names(schema: &[serde_json::Value]) -> Vec<String> {
         .collect()
 }
 
+fn dedupe_tool_schemas(schemas: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut seen = HashSet::new();
+    schemas
+        .into_iter()
+        .filter(|tool| {
+            tool.get("function")
+                .and_then(|func| func.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| seen.insert(name.to_owned()))
+        })
+        .collect()
+}
+
+fn parse_search_tool_names(content: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    content
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let after_prefix = trimmed.strip_prefix("- ")?;
+            let (name, _) = after_prefix.split_once(':')?;
+            let name = name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            seen.insert(name.to_owned()).then_some(name.to_owned())
+        })
+        .collect()
+}
+
 fn truncate_for_log(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_owned();
@@ -312,6 +366,7 @@ mod tests {
 
     use async_trait::async_trait;
     use serde_json::json;
+    use tempfile::tempdir;
     use wiremock::{
         matchers::{method, path},
         Mock, MockServer, Request, Respond, ResponseTemplate,
@@ -321,6 +376,7 @@ mod tests {
         ai::cerebras::CerebrasClient,
         config::Config,
         db::init_db,
+        memory::{write_behaviors, write_personality},
         tools::{Tool, ToolRegistry},
     };
 
@@ -413,6 +469,30 @@ mod tests {
         }
     }
 
+    struct NamedTool {
+        name: &'static str,
+        description: &'static str,
+    }
+
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            self.description
+        }
+
+        fn parameters(&self) -> &str {
+            "none"
+        }
+
+        async fn execute(&self, _params: serde_json::Value) -> Result<String, String> {
+            Ok("ok".to_owned())
+        }
+    }
+
     fn test_config(base_url: String) -> Config {
         Config {
             homeserver_url: "http://localhost:6167".to_owned(),
@@ -426,6 +506,19 @@ mod tests {
             anthropic_model: "claude-sonnet-4-20250514".to_owned(),
             database_url: "sqlite::memory:".to_owned(),
         }
+    }
+
+    fn extract_system_prompt(body: &[u8]) -> String {
+        let value: serde_json::Value =
+            serde_json::from_slice(body).expect("request body should parse as json");
+        value
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|messages| messages.first())
+            .and_then(|message| message.get("content"))
+            .and_then(serde_json::Value::as_str)
+            .expect("first message should be system prompt content")
+            .to_owned()
     }
 
     #[tokio::test]
@@ -631,7 +724,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_max_tool_calls() {
+    async fn max_tool_calls_is_10() {
         let server = MockServer::start().await;
         let config = test_config(format!("{}/v1", server.uri()));
         let cerebras = Arc::new(CerebrasClient::new(&config));
@@ -667,6 +760,15 @@ mod tests {
             .expect("process should return graceful message");
 
         assert!(response.contains("stuck"));
+        let requests = server
+            .received_requests()
+            .await
+            .expect("requests should be available");
+        assert_eq!(
+            requests.len(),
+            11,
+            "expected 10 executed tool calls then graceful stop"
+        );
     }
 
     #[tokio::test]
@@ -715,7 +817,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_rebuilds_tools_schema_each_turn() {
+    async fn process_requires_search_to_expose_dynamic_schemas() {
         let server = MockServer::start().await;
         let config = test_config(format!("{}/v1", server.uri()));
         let cerebras = Arc::new(CerebrasClient::new(&config));
@@ -727,7 +829,7 @@ mod tests {
             let mut guard = registry
                 .write()
                 .expect("registry lock should not be poisoned");
-            guard.register(Box::new(RegisterNewTool {
+            guard.register_builtin(Box::new(RegisterNewTool {
                 registry: Arc::clone(&registry),
             }));
         }
@@ -778,8 +880,8 @@ mod tests {
         let second_body =
             String::from_utf8(requests[1].body.clone()).expect("request body should be utf8");
         assert!(
-            second_body.contains("\"name\":\"late_tool\""),
-            "expected late_tool in second turn tool schema, got: {second_body}"
+            !second_body.contains("\"name\":\"late_tool\""),
+            "late_tool should not be exposed until discovered by search_tools: {second_body}"
         );
     }
 
@@ -791,5 +893,166 @@ mod tests {
         assert!(!super::should_send_interim("  [1,2,3]  "));
         assert!(!super::should_send_interim("  "));
         assert!(super::should_send_interim("let me check that"));
+    }
+
+    #[tokio::test]
+    async fn system_prompt_includes_personality() {
+        let server = MockServer::start().await;
+        let config = test_config(format!("{}/v1", server.uri()));
+        let cerebras = Arc::new(CerebrasClient::new(&config));
+        let db = init_db("sqlite::memory:")
+            .await
+            .expect("db init should succeed");
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let dir = tempdir().expect("tempdir should be created");
+        let data_dir = dir.path().to_string_lossy().to_string();
+        let personality = "# Fern's Personality\n\n## Voice\n- unique personality marker";
+        write_personality(&data_dir, personality).expect("personality should be written");
+
+        let orchestrator = Orchestrator::new(cerebras, registry, data_dir, db);
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{ "message": { "content": "ok" } }]
+            })))
+            .mount(&server)
+            .await;
+
+        let _ = orchestrator
+            .process_message("user", "room", "hi", |_| Box::pin(async { Ok(()) }))
+            .await
+            .expect("process should succeed");
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("requests should be available");
+        let prompt = extract_system_prompt(&requests[0].body);
+        assert!(prompt.contains("unique personality marker"));
+    }
+
+    #[tokio::test]
+    async fn system_prompt_includes_behaviors() {
+        let server = MockServer::start().await;
+        let config = test_config(format!("{}/v1", server.uri()));
+        let cerebras = Arc::new(CerebrasClient::new(&config));
+        let db = init_db("sqlite::memory:")
+            .await
+            .expect("db init should succeed");
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let dir = tempdir().expect("tempdir should be created");
+        let data_dir = dir.path().to_string_lossy().to_string();
+        let behaviors = "# Fern's Learned Behaviors\n\n## General\n- unique behavior marker";
+        write_behaviors(&data_dir, behaviors).expect("behaviors should be written");
+
+        let orchestrator = Orchestrator::new(cerebras, registry, data_dir, db);
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{ "message": { "content": "ok" } }]
+            })))
+            .mount(&server)
+            .await;
+
+        let _ = orchestrator
+            .process_message("user", "room", "hi", |_| Box::pin(async { Ok(()) }))
+            .await
+            .expect("process should succeed");
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("requests should be available");
+        let prompt = extract_system_prompt(&requests[0].body);
+        assert!(prompt.contains("unique behavior marker"));
+    }
+
+    #[tokio::test]
+    async fn system_prompt_no_old_fern_prompt() {
+        let server = MockServer::start().await;
+        let config = test_config(format!("{}/v1", server.uri()));
+        let cerebras = Arc::new(CerebrasClient::new(&config));
+        let db = init_db("sqlite::memory:")
+            .await
+            .expect("db init should succeed");
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let dir = tempdir().expect("tempdir should be created");
+        let data_dir = dir.path().to_string_lossy().to_string();
+        let orchestrator = Orchestrator::new(cerebras, registry, data_dir, db);
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{ "message": { "content": "ok" } }]
+            })))
+            .mount(&server)
+            .await;
+
+        let _ = orchestrator
+            .process_message("user", "room", "hi", |_| Box::pin(async { Ok(()) }))
+            .await
+            .expect("process should succeed");
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("requests should be available");
+        let prompt = extract_system_prompt(&requests[0].body);
+        assert!(!prompt.contains("you're fern 🌿 — a warm, witty personal assistant"));
+    }
+
+    #[tokio::test]
+    async fn orchestrator_starts_with_builtins_only() {
+        let server = MockServer::start().await;
+        let config = test_config(format!("{}/v1", server.uri()));
+        let cerebras = Arc::new(CerebrasClient::new(&config));
+        let db = init_db("sqlite::memory:")
+            .await
+            .expect("db init should succeed");
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Box::new(NamedTool {
+            name: "memory_read",
+            description: "read memory",
+        }));
+        registry.register(Box::new(NamedTool {
+            name: "weather_lookup",
+            description: "fetch weather",
+        }));
+        let registry = Arc::new(RwLock::new(registry));
+        let orchestrator = Orchestrator::new(cerebras, registry, "./data".to_owned(), db);
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{ "message": { "content": "ok" } }]
+            })))
+            .mount(&server)
+            .await;
+
+        let _ = orchestrator
+            .process_message("user", "room", "hi", |_| Box::pin(async { Ok(()) }))
+            .await
+            .expect("process should succeed");
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("requests should be available");
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("request body should be json");
+        let tools = body
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .expect("tools should be present");
+        let tool_names = tools
+            .iter()
+            .filter_map(|tool| {
+                tool.get("function")
+                    .and_then(|function| function.get("name"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .collect::<Vec<_>>();
+        assert!(tool_names.contains(&"memory_read"));
+        assert!(!tool_names.contains(&"weather_lookup"));
     }
 }

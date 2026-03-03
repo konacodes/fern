@@ -6,7 +6,8 @@ use crate::tools::{
     dynamic::{delete_tool, DynamicToolType},
     generator::ToolGenerator,
     http_tool::HttpTool,
-    script_tool::ScriptTool, Tool, ToolRegistry,
+    script_tool::ScriptTool,
+    Tool, ToolRegistry,
 };
 
 pub struct RequestToolTool {
