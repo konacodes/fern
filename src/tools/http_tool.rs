@@ -212,14 +212,7 @@ fn render_template(
         let encoded = percent_encode(&raw);
         rendered = rendered.replace(&format!("{{{{{name}}}}}"), &encoded);
     }
-
-    if let Some(start) = rendered.find("{{") {
-        if let Some(end) = rendered[start + 2..].find("}}") {
-            let placeholder = &rendered[start + 2..start + 2 + end];
-            return Err(format!("missing template parameter: {placeholder}"));
-        }
-    }
-    Ok(rendered)
+    Ok(replace_unbound_placeholders(&rendered))
 }
 
 fn value_to_string(value: &serde_json::Value) -> Result<String, String> {
@@ -249,6 +242,30 @@ fn percent_encode(value: &str) -> String {
 
 fn truncate_response(body: &str) -> String {
     body.chars().take(2000).collect::<String>()
+}
+
+fn replace_unbound_placeholders(template: &str) -> String {
+    let mut output = String::new();
+    let mut rest = template;
+
+    while let Some(start) = rest.find("{{") {
+        output.push_str(&rest[..start]);
+        let after_start = &rest[start + 2..];
+        if let Some(end) = after_start.find("}}") {
+            let placeholder = after_start[..end].trim();
+            tracing::debug!(
+                placeholder,
+                "replacing unbound template placeholder with empty string"
+            );
+            rest = &after_start[end + 2..];
+        } else {
+            output.push_str(&rest[start..]);
+            return output;
+        }
+    }
+
+    output.push_str(rest);
+    output
 }
 
 #[cfg(test)]
@@ -463,6 +480,59 @@ mod tests {
             .await
             .expect("tool should succeed");
         assert_eq!(result.len(), 2000);
+    }
+
+    #[tokio::test]
+    async fn http_tool_allows_missing_optional_template_param() {
+        let server = MockServer::start().await;
+        let def = DynamicToolDef {
+            name: "optional_query".to_owned(),
+            description: "supports optional category".to_owned(),
+            parameters: vec![ToolParam {
+                name: "country".to_owned(),
+                param_type: "string".to_owned(),
+                description: "country code".to_owned(),
+                required: true,
+            }],
+            tool_type: DynamicToolType::Http {
+                url_template: format!(
+                    "{}/news?country={{{{country}}}}&category={{{{category}}}}",
+                    server.uri()
+                ),
+                method: "GET".to_owned(),
+                headers: HashMap::new(),
+                body_template: None,
+                response_jq: None,
+            },
+        };
+        let tool = HttpTool::new(def).expect("tool should build");
+
+        Mock::given(method("GET"))
+            .and(path("/news"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = tool
+            .execute(json!({ "country": "us" }))
+            .await
+            .expect("tool should succeed");
+        assert_eq!(result, "ok");
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("requests should be retrievable");
+        let url = requests[0].url.as_str();
+        assert!(
+            url.contains("country=us"),
+            "expected country query param in url, got: {url}"
+        );
+        assert!(
+            url.contains("category="),
+            "expected optional category placeholder to resolve as empty, got: {url}"
+        );
     }
 
     #[test]

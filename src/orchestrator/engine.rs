@@ -66,20 +66,6 @@ impl Orchestrator {
             .collect::<Vec<_>>();
 
         let memory = read_memory_file(&self.data_dir);
-        let tools_schema = self
-            .registry
-            .read()
-            .map_err(|_| "failed to acquire tool registry read lock".to_owned())?
-            .build_tools_schema();
-        let tool_names = extract_tool_names(&tools_schema);
-        tracing::debug!(
-            room_id,
-            history_len = history.len(),
-            memory_chars = memory.len(),
-            tools_count = tools_schema.len(),
-            tools = %tool_names.join(","),
-            "orchestrator context prepared"
-        );
         let system_prompt =
             format!("{FERN_SYSTEM_PROMPT}\n\ncurrent memory:\n{memory}\n\n{ORCHESTRATOR_PROMPT}");
 
@@ -87,11 +73,20 @@ impl Orchestrator {
         let mut loop_iteration = 0usize;
         loop {
             loop_iteration += 1;
+            let tools_schema = self
+                .registry
+                .read()
+                .map_err(|_| "failed to acquire tool registry read lock".to_owned())?
+                .build_tools_schema();
+            let tool_names = extract_tool_names(&tools_schema);
             tracing::debug!(
                 room_id,
                 loop_iteration,
                 total_tool_calls,
                 history_len = history.len(),
+                memory_chars = memory.len(),
+                tools_count = tools_schema.len(),
+                tools = %tool_names.join(","),
                 "starting orchestrator model turn"
             );
             let response = self
@@ -349,6 +344,55 @@ mod tests {
 
         async fn execute(&self, _params: serde_json::Value) -> Result<String, String> {
             Ok("42".to_owned())
+        }
+    }
+
+    struct LateTool;
+
+    #[async_trait]
+    impl Tool for LateTool {
+        fn name(&self) -> &str {
+            "late_tool"
+        }
+
+        fn description(&self) -> &str {
+            "registered at runtime"
+        }
+
+        fn parameters(&self) -> &str {
+            "none"
+        }
+
+        async fn execute(&self, _params: serde_json::Value) -> Result<String, String> {
+            Ok("late".to_owned())
+        }
+    }
+
+    struct RegisterNewTool {
+        registry: Arc<RwLock<ToolRegistry>>,
+    }
+
+    #[async_trait]
+    impl Tool for RegisterNewTool {
+        fn name(&self) -> &str {
+            "register_new_tool"
+        }
+
+        fn description(&self) -> &str {
+            "registers a late tool"
+        }
+
+        fn parameters(&self) -> &str {
+            "none"
+        }
+
+        async fn execute(&self, _params: serde_json::Value) -> Result<String, String> {
+            let mut guard = self
+                .registry
+                .write()
+                .map_err(|_| "registry lock poisoned".to_owned())?;
+            guard.register(Box::new(LateTool));
+            Ok("registered late_tool".to_owned())
         }
     }
 
@@ -668,6 +712,75 @@ mod tests {
             .expect("process should return graceful message");
 
         assert!(response.contains("missing_tool"));
+    }
+
+    #[tokio::test]
+    async fn process_rebuilds_tools_schema_each_turn() {
+        let server = MockServer::start().await;
+        let config = test_config(format!("{}/v1", server.uri()));
+        let cerebras = Arc::new(CerebrasClient::new(&config));
+        let db = init_db("sqlite::memory:")
+            .await
+            .expect("db init should succeed");
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        {
+            let mut guard = registry
+                .write()
+                .expect("registry lock should not be poisoned");
+            guard.register(Box::new(RegisterNewTool {
+                registry: Arc::clone(&registry),
+            }));
+        }
+        let orchestrator =
+            Orchestrator::new(cerebras, Arc::clone(&registry), "./data".to_owned(), db);
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(SequenceResponder {
+                calls: Arc::new(AtomicUsize::new(0)),
+                first: json!({
+                    "choices": [{
+                        "message": {
+                            "tool_calls": [{
+                                "id": "call_1",
+                                "type": "function",
+                                "function": { "name": "register_new_tool", "arguments": "{}" }
+                            }]
+                        }
+                    }]
+                }),
+                second: json!({
+                    "choices": [{
+                        "message": { "content": "done" }
+                    }]
+                }),
+            })
+            .mount(&server)
+            .await;
+
+        let response = orchestrator
+            .process_message("user", "room", "register a tool", |_| {
+                Box::pin(async { Ok(()) })
+            })
+            .await
+            .expect("process should succeed");
+        assert_eq!(response, "done");
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("requests should be available");
+        assert!(
+            requests.len() >= 2,
+            "expected at least two model turns, got {}",
+            requests.len()
+        );
+        let second_body =
+            String::from_utf8(requests[1].body.clone()).expect("request body should be utf8");
+        assert!(
+            second_body.contains("\"name\":\"late_tool\""),
+            "expected late_tool in second turn tool schema, got: {second_body}"
+        );
     }
 
     #[test]
