@@ -2,9 +2,8 @@ use std::env;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
-    pub homeserver_url: String,
-    pub bot_user: String,
-    pub bot_password: String,
+    pub signal_api_url: String,
+    pub signal_account_number: String,
     pub data_dir: String,
     pub cerebras_api_key: String,
     pub cerebras_model: String,
@@ -18,9 +17,8 @@ impl Config {
     pub fn from_env() -> Self {
         let _ = dotenvy::dotenv();
 
-        let homeserver_url = required_var("HOMESERVER_URL");
-        let bot_user = required_var("BOT_USER");
-        let bot_password = required_var("BOT_PASSWORD");
+        let signal_api_url = required_var("SIGNAL_API_URL");
+        let signal_account_number = required_var("SIGNAL_ACCOUNT_NUMBER");
         let cerebras_api_key = required_var("CEREBRAS_API_KEY");
         let data_dir = env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_owned());
         let cerebras_model =
@@ -34,9 +32,8 @@ impl Config {
             env::var("DATABASE_URL").unwrap_or_else(|_| format!("sqlite://{data_dir}/fern.db"));
 
         Self {
-            homeserver_url,
-            bot_user,
-            bot_password,
+            signal_api_url,
+            signal_account_number,
             data_dir,
             cerebras_api_key,
             cerebras_model,
@@ -79,9 +76,8 @@ mod tests {
         let _guard = env_lock().lock().expect("env lock should not be poisoned");
 
         let vars = [
-            "HOMESERVER_URL",
-            "BOT_USER",
-            "BOT_PASSWORD",
+            "SIGNAL_API_URL",
+            "SIGNAL_ACCOUNT_NUMBER",
             "DATA_DIR",
             "CEREBRAS_API_KEY",
             "CEREBRAS_MODEL",
@@ -95,9 +91,8 @@ mod tests {
             .map(|name| ((*name).to_owned(), std::env::var(name).ok()))
             .collect();
 
-        std::env::set_var("HOMESERVER_URL", "http://localhost:6167");
-        std::env::set_var("BOT_USER", "@fern:local");
-        std::env::set_var("BOT_PASSWORD", "");
+        std::env::set_var("SIGNAL_API_URL", "");
+        std::env::set_var("SIGNAL_ACCOUNT_NUMBER", "+15550000000");
         std::env::set_var("CEREBRAS_API_KEY", "test-key");
         std::env::set_var("DATA_DIR", "./data");
 
@@ -120,7 +115,7 @@ mod tests {
         };
 
         assert!(
-            message.contains("Missing required environment variable: BOT_PASSWORD"),
+            message.contains("Missing required environment variable: SIGNAL_API_URL"),
             "unexpected panic message: {message}"
         );
     }
@@ -130,9 +125,8 @@ mod tests {
         let _guard = env_lock().lock().expect("env lock should not be poisoned");
 
         let vars = [
-            "HOMESERVER_URL",
-            "BOT_USER",
-            "BOT_PASSWORD",
+            "SIGNAL_API_URL",
+            "SIGNAL_ACCOUNT_NUMBER",
             "DATA_DIR",
             "CEREBRAS_API_KEY",
             "CEREBRAS_MODEL",
@@ -146,9 +140,8 @@ mod tests {
             .map(|name| ((*name).to_owned(), std::env::var(name).ok()))
             .collect();
 
-        std::env::set_var("HOMESERVER_URL", "http://localhost:6167");
-        std::env::set_var("BOT_USER", "@fern:local");
-        std::env::set_var("BOT_PASSWORD", "secret");
+        std::env::set_var("SIGNAL_API_URL", "http://signal-api:8080");
+        std::env::set_var("SIGNAL_ACCOUNT_NUMBER", "+15550000000");
         std::env::set_var("CEREBRAS_API_KEY", "");
         std::env::set_var("DATA_DIR", "./data");
 
@@ -174,5 +167,42 @@ mod tests {
             message.contains("Missing required environment variable: CEREBRAS_API_KEY"),
             "unexpected panic message: {message}"
         );
+    }
+
+    #[test]
+    fn config_loads_signal_fields() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+
+        let vars = [
+            "SIGNAL_API_URL",
+            "SIGNAL_ACCOUNT_NUMBER",
+            "DATA_DIR",
+            "CEREBRAS_API_KEY",
+            "CEREBRAS_MODEL",
+            "CEREBRAS_BASE_URL",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_MODEL",
+            "DATABASE_URL",
+        ];
+        let originals: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|name| ((*name).to_owned(), std::env::var(name).ok()))
+            .collect();
+
+        std::env::set_var("SIGNAL_API_URL", "http://signal-api:8080");
+        std::env::set_var("SIGNAL_ACCOUNT_NUMBER", "+15550000000");
+        std::env::set_var("CEREBRAS_API_KEY", "test-key");
+        std::env::set_var("DATA_DIR", "./data");
+
+        let config = Config::from_env();
+        assert_eq!(config.signal_api_url, "http://signal-api:8080");
+        assert_eq!(config.signal_account_number, "+15550000000");
+
+        for (name, value) in originals {
+            match value {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
     }
 }

@@ -2,11 +2,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Local};
-use matrix_sdk::ruma::OwnedRoomId;
 use serde_json::json;
 use tokio::time::sleep;
 
 use crate::{
+    adapter::MessagingAdapter,
     ai::cerebras::{CerebrasClient, ChatMessage},
     tools::Tool,
 };
@@ -21,7 +21,7 @@ struct Reminder {
     message: String,
     fire_at: DateTime<Local>,
     user_id: String,
-    room_id: String,
+    conversation_id: String,
 }
 
 impl ReminderStore {
@@ -117,17 +117,17 @@ impl Tool for RemindTool {
             .get("user_id")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "missing required context: user_id".to_owned())?;
-        let room_id = params
-            .get("room_id")
+        let conversation_id = params
+            .get("conversation_id")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "missing required context: room_id".to_owned())?;
+            .ok_or_else(|| "missing required context: conversation_id".to_owned())?;
 
         let fire_at = Local::now() + Duration::minutes(delay_minutes);
         let reminder = Reminder {
             message: message.to_owned(),
             fire_at,
             user_id: user_id.to_owned(),
-            room_id: room_id.to_owned(),
+            conversation_id: conversation_id.to_owned(),
         };
 
         let mut guard = self
@@ -138,7 +138,7 @@ impl Tool for RemindTool {
         guard.push(reminder);
         tracing::info!(
             user_id = %user_id,
-            room_id = %room_id,
+            conversation_id = %conversation_id,
             fire_at = %fire_at.to_rfc3339(),
             "reminder scheduled"
         );
@@ -208,115 +208,141 @@ send a short reminder message. keep it to one sentence, lowercase, and concise."
 
 pub async fn run_reminder_loop(
     store: ReminderStore,
-    client: matrix_sdk::Client,
+    adapter: Arc<dyn MessagingAdapter>,
     cerebras: Arc<CerebrasClient>,
 ) {
     tracing::info!("reminder loop started");
     loop {
         sleep(std::time::Duration::from_secs(30)).await;
+        process_due_reminders_once(&store, Arc::clone(&adapter), Arc::clone(&cerebras)).await;
+    }
+}
 
-        let now = Local::now();
-        let (due, pending_count_after_partition) = {
-            let mut guard = match store.reminders.lock() {
-                Ok(guard) => guard,
-                Err(err) => {
-                    tracing::error!(error = %err, "reminder store lock poisoned");
-                    continue;
-                }
-            };
-            let before_count = guard.len();
-            let reminders = guard.drain(..).collect::<Vec<_>>();
-            let (due, pending) = partition_due_reminders(reminders, now);
-            let due_count = due.len();
-            let pending_count = pending.len();
-            *guard = pending;
-            tracing::trace!(
-                before_count,
-                due_count,
-                pending_count,
-                now = %now.to_rfc3339(),
-                "reminder loop partitioned reminders"
-            );
-            (due, pending_count)
-        };
-
-        let mut retries = Vec::new();
-        for reminder in due {
-            tracing::debug!(
-                room_id = %reminder.room_id,
-                user_id = %reminder.user_id,
-                fire_at = %reminder.fire_at.to_rfc3339(),
-                message = %reminder.message,
-                "processing due reminder"
-            );
-            let room_id: Result<OwnedRoomId, _> = reminder.room_id.as_str().try_into();
-            let Ok(room_id) = room_id else {
-                tracing::warn!(room_id = %reminder.room_id, "invalid reminder room_id");
-                continue;
-            };
-
-            let Some(room) = client.get_room(&room_id) else {
-                tracing::warn!(room_id = %room_id, "room not found for reminder");
-                retries.push(with_retry_delay(reminder, now));
-                continue;
-            };
-
-            let reminder_text = render_reminder_message(cerebras.as_ref(), &reminder.message).await;
-            if let Err(err) = room
-                .send(
-                    matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
-                        reminder_text,
-                    ),
-                )
-                .await
-            {
-                tracing::error!(
-                    error = %err,
-                    room_id = %room_id,
-                    user_id = %reminder.user_id,
-                    "failed to send reminder"
-                );
-                retries.push(with_retry_delay(reminder, now));
-            } else {
-                tracing::info!(
-                    room_id = %room_id,
-                    user_id = %reminder.user_id,
-                    "sent reminder"
-                );
+pub async fn process_due_reminders_once(
+    store: &ReminderStore,
+    adapter: Arc<dyn MessagingAdapter>,
+    cerebras: Arc<CerebrasClient>,
+) {
+    let now = Local::now();
+    let (due, pending_count_after_partition) = {
+        let mut guard = match store.reminders.lock() {
+            Ok(guard) => guard,
+            Err(err) => {
+                tracing::error!(error = %err, "reminder store lock poisoned");
+                return;
             }
-        }
+        };
+        let before_count = guard.len();
+        let reminders = guard.drain(..).collect::<Vec<_>>();
+        let (due, pending) = partition_due_reminders(reminders, now);
+        let due_count = due.len();
+        let pending_count = pending.len();
+        *guard = pending;
+        tracing::trace!(
+            before_count,
+            due_count,
+            pending_count,
+            now = %now.to_rfc3339(),
+            "reminder loop partitioned reminders"
+        );
+        (due, pending_count)
+    };
 
-        if !retries.is_empty() {
-            let mut guard = match store.reminders.lock() {
-                Ok(guard) => guard,
-                Err(err) => {
-                    tracing::error!(error = %err, "reminder store lock poisoned while retrying");
-                    continue;
-                }
-            };
-            let retry_count = retries.len();
-            guard.extend(retries);
-            tracing::warn!(
-                retry_count,
-                pending_count = guard.len(),
-                pending_count_after_partition,
-                "re-queued reminders after delivery failure"
+    let mut retries = Vec::new();
+    for reminder in due {
+        tracing::debug!(
+            conversation_id = %reminder.conversation_id,
+            user_id = %reminder.user_id,
+            fire_at = %reminder.fire_at.to_rfc3339(),
+            message = %reminder.message,
+            "processing due reminder"
+        );
+
+        let reminder_text = render_reminder_message(cerebras.as_ref(), &reminder.message).await;
+        if let Err(err) = adapter
+            .send_message(&reminder.conversation_id, &reminder_text)
+            .await
+        {
+            tracing::error!(
+                error = %err,
+                conversation_id = %reminder.conversation_id,
+                user_id = %reminder.user_id,
+                "failed to send reminder"
             );
+            retries.push(with_retry_delay(reminder, now));
         } else {
-            tracing::trace!(
-                pending_count_after_partition,
-                "reminder loop iteration completed with no retries"
+            tracing::info!(
+                conversation_id = %reminder.conversation_id,
+                user_id = %reminder.user_id,
+                "sent reminder"
             );
         }
+    }
+
+    if !retries.is_empty() {
+        let mut guard = match store.reminders.lock() {
+            Ok(guard) => guard,
+            Err(err) => {
+                tracing::error!(error = %err, "reminder store lock poisoned while retrying");
+                return;
+            }
+        };
+        let retry_count = retries.len();
+        guard.extend(retries);
+        tracing::warn!(
+            retry_count,
+            pending_count = guard.len(),
+            pending_count_after_partition,
+            "re-queued reminders after delivery failure"
+        );
+    } else {
+        tracing::trace!(
+            pending_count_after_partition,
+            "reminder loop iteration completed with no retries"
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, Local};
+    use std::sync::Arc;
 
-    use super::{partition_due_reminders, with_retry_delay, RemindTool, Reminder, ReminderStore};
-    use crate::tools::Tool;
+    use chrono::{Duration, Local};
+    use serde_json::json;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    use super::{
+        partition_due_reminders, process_due_reminders_once, with_retry_delay, RemindTool,
+        Reminder, ReminderStore,
+    };
+    use crate::{
+        adapter::{MessageHandler, MessagingAdapter},
+        ai::cerebras::CerebrasClient,
+        config::Config,
+        tools::Tool,
+    };
+
+    struct MockAdapter {
+        sent: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MessagingAdapter for MockAdapter {
+        async fn run(&self, _handler: Arc<dyn MessageHandler>) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn send_message(&self, conversation_id: &str, text: &str) -> Result<(), String> {
+            self.sent
+                .lock()
+                .map_err(|_| "lock poisoned".to_owned())?
+                .push((conversation_id.to_owned(), text.to_owned()));
+            Ok(())
+        }
+    }
 
     #[tokio::test]
     async fn set_reminder_stores() {
@@ -328,7 +354,7 @@ mod tests {
                 "message": "stretch",
                 "delay_minutes": 30,
                 "user_id": "@jason:kcodes.me",
-                "room_id": "!room:kcodes.me"
+                "conversation_id": "+15550000001"
             }))
             .await
             .expect("execute should succeed");
@@ -366,7 +392,7 @@ mod tests {
                 "message": "stretch",
                 "delay_minutes": "1",
                 "user_id": "@jason:kcodes.me",
-                "room_id": "!room:kcodes.me"
+                "conversation_id": "+15550000001"
             }))
             .await
             .expect("execute should succeed");
@@ -405,7 +431,7 @@ mod tests {
                 "message": "stretch",
                 "delay_minutes": 30,
                 "user_id": "@jason:kcodes.me",
-                "room_id": "!room:kcodes.me"
+                "conversation_id": "+15550000001"
             }))
             .await
             .expect("execute should succeed");
@@ -431,13 +457,13 @@ mod tests {
             message: "due".to_owned(),
             fire_at: now - Duration::minutes(1),
             user_id: "@u:a".to_owned(),
-            room_id: "!r:a".to_owned(),
+            conversation_id: "+15550000001".to_owned(),
         };
         let pending_reminder = Reminder {
             message: "pending".to_owned(),
             fire_at: now + Duration::minutes(1),
             user_id: "@u:a".to_owned(),
-            room_id: "!r:a".to_owned(),
+            conversation_id: "+15550000002".to_owned(),
         };
 
         let (due, pending) = partition_due_reminders(vec![due_reminder, pending_reminder], now);
@@ -454,10 +480,58 @@ mod tests {
             message: "retry me".to_owned(),
             fire_at: now - Duration::minutes(1),
             user_id: "@u:a".to_owned(),
-            room_id: "!r:a".to_owned(),
+            conversation_id: "+15550000001".to_owned(),
         };
 
         let retried = with_retry_delay(reminder, now);
         assert!(retried.fire_at > now);
+    }
+
+    #[tokio::test]
+    async fn reminder_fires_via_adapter() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{ "message": { "content": "🌿 reminder: stretch" } }]
+            })))
+            .mount(&server)
+            .await;
+
+        let store = ReminderStore::new();
+        let tool = RemindTool::new(store.clone());
+        tool.execute(json!({
+            "message": "stretch",
+            "delay_minutes": 0,
+            "user_id": "@jason:kcodes.me",
+            "conversation_id": "+15550000001"
+        }))
+        .await
+        .expect("set reminder should succeed");
+
+        let adapter_state = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let adapter: Arc<dyn MessagingAdapter> = Arc::new(MockAdapter {
+            sent: Arc::clone(&adapter_state),
+        });
+        let config = Config {
+            signal_api_url: "http://signal-api:8080".to_owned(),
+            signal_account_number: "+15550000000".to_owned(),
+            data_dir: "./data".to_owned(),
+            cerebras_api_key: "test-key".to_owned(),
+            cerebras_model: "qwen-3-235b".to_owned(),
+            cerebras_base_url: format!("{}/v1", server.uri()),
+            anthropic_api_key: None,
+            anthropic_model: "claude-sonnet-4-20250514".to_owned(),
+            database_url: "sqlite::memory:".to_owned(),
+        };
+        let cerebras = Arc::new(CerebrasClient::new(&config));
+
+        process_due_reminders_once(&store, adapter, cerebras).await;
+
+        let sent = adapter_state
+            .lock()
+            .expect("adapter sent lock should not be poisoned");
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "+15550000001");
     }
 }

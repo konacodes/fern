@@ -1,6 +1,8 @@
 use std::sync::{Arc, RwLock};
 
+use fern::Config;
 use fern::{
+    adapter::{orchestrator_handler::FernHandler, signal::SignalAdapter, MessagingAdapter},
     ai::{anthropic::AnthropicClient, cerebras::CerebrasClient},
     db,
     memory::consolidator::{run_nightly_loop, Consolidator},
@@ -21,7 +23,6 @@ use fern::{
         ToolRegistry,
     },
 };
-use fern::{Config, FernBot};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -37,7 +38,8 @@ async fn main() {
 async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = Config::from_env();
     tracing::info!(
-        homeserver_url = %config.homeserver_url,
+        signal_api_url = %config.signal_api_url,
+        signal_account_number = %config.signal_account_number,
         cerebras_base_url = %config.cerebras_base_url,
         configured_model = %config.cerebras_model,
         database_url = %config.database_url,
@@ -87,14 +89,23 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tokio::spawn(run_nightly_loop(Arc::clone(&consolidator)));
     tracing::info!("spawned nightly consolidation loop");
 
-    let bot = FernBot::new(config, orchestrator).await?;
+    let adapter: Arc<dyn MessagingAdapter> = Arc::new(SignalAdapter::new(
+        config.signal_api_url.clone(),
+        config.signal_account_number.clone(),
+    ));
+    let handler = Arc::new(FernHandler::new(
+        Arc::clone(&orchestrator),
+        Arc::clone(&adapter),
+        config.data_dir.clone(),
+        db.clone(),
+    ));
     tokio::spawn(run_reminder_loop(
         reminder_store,
-        bot.client.clone(),
+        Arc::clone(&adapter),
         Arc::clone(&orchestrator_cerebras),
     ));
     tracing::info!("spawned reminder loop");
-    bot.run().await?;
+    adapter.run(handler).await.map_err(std::io::Error::other)?;
     Ok(())
 }
 
@@ -147,7 +158,7 @@ fn build_registry_for_test(
 
 fn init_tracing() {
     let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("fern=trace,matrix_sdk=info,sqlx=warn,reqwest=warn"));
+        .unwrap_or_else(|_| EnvFilter::new("fern=trace,sqlx=warn,reqwest=warn"));
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 }
 

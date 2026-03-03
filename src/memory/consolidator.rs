@@ -162,9 +162,8 @@ mod tests {
 
     fn test_config(base_url: String) -> Config {
         Config {
-            homeserver_url: "http://localhost:6167".to_owned(),
-            bot_user: "@fern:example.org".to_owned(),
-            bot_password: "password".to_owned(),
+            signal_api_url: "http://signal-api:8080".to_owned(),
+            signal_account_number: "+15550000000".to_owned(),
             data_dir: "./data".to_owned(),
             cerebras_api_key: "test-key".to_owned(),
             cerebras_model: "qwen-3-235b".to_owned(),
