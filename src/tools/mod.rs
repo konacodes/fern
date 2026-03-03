@@ -1,8 +1,15 @@
+pub mod dynamic;
+pub mod generator;
+pub mod http_tool;
+pub mod loader;
 pub mod memory;
 pub mod remind;
+pub mod request_tool;
+pub mod script_tool;
 pub mod time;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -44,7 +51,7 @@ pub trait Tool: Send + Sync {
 }
 
 pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn Tool>>,
+    tools: HashMap<String, Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
@@ -56,13 +63,14 @@ impl ToolRegistry {
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
         tracing::info!(tool = %tool.name(), "registering tool");
-        self.tools.insert(tool.name().to_owned(), tool);
+        let arc: Arc<dyn Tool> = Arc::from(tool);
+        self.tools.insert(arc.name().to_owned(), arc);
     }
 
-    pub fn get(&self, name: &str) -> Option<&dyn Tool> {
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         let found = self.tools.contains_key(name);
         tracing::debug!(tool = name, found, "tool lookup");
-        self.tools.get(name).map(|tool| tool.as_ref())
+        self.tools.get(name).cloned()
     }
 
     pub fn list(&self) -> Vec<(&str, &str, &str)> {

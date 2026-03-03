@@ -227,7 +227,7 @@ impl FernBot {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock};
 
     use super::FernBot;
     use crate::{
@@ -246,6 +246,8 @@ mod tests {
             cerebras_api_key: "test-key".to_owned(),
             cerebras_model: "qwen-3-235b".to_owned(),
             cerebras_base_url: "https://api.cerebras.ai/v1".to_owned(),
+            anthropic_api_key: None,
+            anthropic_model: "claude-sonnet-4-20250514".to_owned(),
             database_url: "sqlite::memory:".to_owned(),
         };
 
@@ -253,7 +255,7 @@ mod tests {
             .await
             .expect("db should initialize");
         let cerebras = Arc::new(CerebrasClient::new(&config));
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
         let orchestrator = Arc::new(Orchestrator::new(
             cerebras,
             registry,

@@ -1,13 +1,16 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use fern::{
-    ai::cerebras::CerebrasClient,
+    ai::{anthropic::AnthropicClient, cerebras::CerebrasClient},
     db,
     memory::consolidator::{run_nightly_loop, Consolidator},
     orchestrator::engine::Orchestrator,
     tools::{
+        generator::ToolGenerator,
+        loader::load_and_register_tools,
         memory::{MemoryReadTool, MemoryWriteTool},
         remind::{run_reminder_loop, RemindTool, ReminderStore},
+        request_tool::RequestToolTool,
         time::CurrentTimeTool,
         ToolRegistry,
     },
@@ -49,8 +52,28 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     registry.register(Box::new(MemoryWriteTool::new(config.data_dir.clone())));
     registry.register(Box::new(CurrentTimeTool));
     registry.register(Box::new(RemindTool::new(reminder_store.clone())));
-    let registry = Arc::new(registry);
-    tracing::info!("tool registry initialized");
+    load_and_register_tools(&config.data_dir, &mut registry);
+    let registry = Arc::new(RwLock::new(registry));
+    tracing::info!("tool registry initialized with static + dynamic tools");
+
+    let anthropic = config.anthropic_api_key.as_ref().map(|api_key| {
+        Arc::new(AnthropicClient::new(
+            api_key.clone(),
+            config.anthropic_model.clone(),
+        ))
+    });
+    if let Some(anthropic) = anthropic {
+        tracing::info!(model = %config.anthropic_model, "anthropic tool generation enabled");
+        let generator = Arc::new(ToolGenerator::new(anthropic, config.data_dir.clone()));
+        let request_tool =
+            RequestToolTool::new(generator, Arc::clone(&registry), config.data_dir.clone());
+        let mut guard = registry
+            .write()
+            .map_err(|_| std::io::Error::other("failed to acquire tool registry write lock"))?;
+        guard.register(Box::new(request_tool));
+    } else {
+        tracing::info!("anthropic api key not set; request_tool is disabled");
+    }
 
     let orchestrator = Arc::new(Orchestrator::new(
         Arc::clone(&orchestrator_cerebras),

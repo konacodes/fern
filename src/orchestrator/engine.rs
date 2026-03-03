@@ -1,4 +1,7 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::{Arc, RwLock},
+};
 
 use futures_util::future::BoxFuture;
 use serde_json::json;
@@ -14,7 +17,7 @@ use crate::{
 
 pub struct Orchestrator {
     pub cerebras: Arc<CerebrasClient>,
-    pub registry: Arc<ToolRegistry>,
+    pub registry: Arc<RwLock<ToolRegistry>>,
     pub data_dir: String,
     pub db: SqlitePool,
 }
@@ -22,7 +25,7 @@ pub struct Orchestrator {
 impl Orchestrator {
     pub fn new(
         cerebras: Arc<CerebrasClient>,
-        registry: Arc<ToolRegistry>,
+        registry: Arc<RwLock<ToolRegistry>>,
         data_dir: String,
         db: SqlitePool,
     ) -> Self {
@@ -63,7 +66,11 @@ impl Orchestrator {
             .collect::<Vec<_>>();
 
         let memory = read_memory_file(&self.data_dir);
-        let tools_schema = self.registry.build_tools_schema();
+        let tools_schema = self
+            .registry
+            .read()
+            .map_err(|_| "failed to acquire tool registry read lock".to_owned())?
+            .build_tools_schema();
         let tool_names = extract_tool_names(&tools_schema);
         tracing::debug!(
             room_id,
@@ -160,7 +167,7 @@ impl Orchestrator {
             });
 
             for tool_call in tool_calls {
-                if total_tool_calls >= 5 {
+                if total_tool_calls >= 8 {
                     let text =
                         "hmm i'm getting stuck in tool calls right now, try again in a sec 🌿"
                             .to_owned();
@@ -213,7 +220,12 @@ impl Orchestrator {
                     }
                 }
 
-                let tool_result = if let Some(tool) = self.registry.get(&tool_call.function.name) {
+                let tool = self
+                    .registry
+                    .read()
+                    .map_err(|_| "failed to acquire tool registry read lock".to_owned())?
+                    .get(&tool_call.function.name);
+                let tool_result = if let Some(tool) = tool {
                     tracing::debug!(
                         room_id,
                         loop_iteration,
@@ -300,7 +312,7 @@ fn truncate_for_log(value: &str, max_chars: usize) -> String {
 mod tests {
     use std::{
         sync::atomic::{AtomicUsize, Ordering},
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, RwLock},
     };
 
     use async_trait::async_trait;
@@ -366,6 +378,8 @@ mod tests {
             cerebras_api_key: "test-key".to_owned(),
             cerebras_model: "qwen-3-235b".to_owned(),
             cerebras_base_url: base_url,
+            anthropic_api_key: None,
+            anthropic_model: "claude-sonnet-4-20250514".to_owned(),
             database_url: "sqlite::memory:".to_owned(),
         }
     }
@@ -378,7 +392,7 @@ mod tests {
         let db = init_db("sqlite::memory:")
             .await
             .expect("db init should succeed");
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
         let orchestrator = Orchestrator::new(cerebras, registry, "./data".to_owned(), db);
 
         Mock::given(method("POST"))
@@ -407,7 +421,7 @@ mod tests {
             .expect("db init should succeed");
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(DummyTool));
-        let registry = Arc::new(registry);
+        let registry = Arc::new(RwLock::new(registry));
         let orchestrator = Orchestrator::new(cerebras, registry, "./data".to_owned(), db);
 
         Mock::given(method("POST"))
@@ -465,7 +479,7 @@ mod tests {
             .expect("db init should succeed");
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(DummyTool));
-        let registry = Arc::new(registry);
+        let registry = Arc::new(RwLock::new(registry));
         let orchestrator = Orchestrator::new(cerebras, registry, "./data".to_owned(), db);
 
         Mock::given(method("POST"))
@@ -522,7 +536,7 @@ mod tests {
             .expect("db init should succeed");
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(DummyTool));
-        let registry = Arc::new(registry);
+        let registry = Arc::new(RwLock::new(registry));
         let orchestrator = Orchestrator::new(cerebras, registry, "./data".to_owned(), db);
 
         Mock::given(method("POST"))
@@ -582,7 +596,7 @@ mod tests {
             .expect("db init should succeed");
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(DummyTool));
-        let registry = Arc::new(registry);
+        let registry = Arc::new(RwLock::new(registry));
         let orchestrator = Orchestrator::new(cerebras, registry, "./data".to_owned(), db);
 
         Mock::given(method("POST"))
@@ -619,7 +633,7 @@ mod tests {
         let db = init_db("sqlite::memory:")
             .await
             .expect("db init should succeed");
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
         let orchestrator = Orchestrator::new(cerebras, registry, "./data".to_owned(), db);
 
         Mock::given(method("POST"))

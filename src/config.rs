@@ -9,6 +9,8 @@ pub struct Config {
     pub cerebras_api_key: String,
     pub cerebras_model: String,
     pub cerebras_base_url: String,
+    pub anthropic_api_key: Option<String>,
+    pub anthropic_model: String,
     pub database_url: String,
 }
 
@@ -25,6 +27,9 @@ impl Config {
             env::var("CEREBRAS_MODEL").unwrap_or_else(|_| "llama3.1-8b".to_owned());
         let cerebras_base_url = env::var("CEREBRAS_BASE_URL")
             .unwrap_or_else(|_| "https://api.cerebras.ai/v1".to_owned());
+        let anthropic_api_key = optional_var("ANTHROPIC_API_KEY");
+        let anthropic_model =
+            env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_owned());
         let database_url =
             env::var("DATABASE_URL").unwrap_or_else(|_| format!("sqlite://{data_dir}/fern.db"));
 
@@ -36,6 +41,8 @@ impl Config {
             cerebras_api_key,
             cerebras_model,
             cerebras_base_url,
+            anthropic_api_key,
+            anthropic_model,
             database_url,
         }
     }
@@ -46,6 +53,13 @@ fn required_var(name: &str) -> String {
         Ok(value) if !value.trim().is_empty() => value,
         _ => panic!("Missing required environment variable: {name}"),
     }
+}
+
+fn optional_var(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]
@@ -72,6 +86,8 @@ mod tests {
             "CEREBRAS_API_KEY",
             "CEREBRAS_MODEL",
             "CEREBRAS_BASE_URL",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_MODEL",
             "DATABASE_URL",
         ];
         let originals: Vec<(String, Option<String>)> = vars
@@ -121,6 +137,8 @@ mod tests {
             "CEREBRAS_API_KEY",
             "CEREBRAS_MODEL",
             "CEREBRAS_BASE_URL",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_MODEL",
             "DATABASE_URL",
         ];
         let originals: Vec<(String, Option<String>)> = vars

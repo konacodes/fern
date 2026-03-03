@@ -97,6 +97,8 @@ mod tests {
             cerebras_api_key: "test-key".to_owned(),
             cerebras_model: "llama3.1-8b".to_owned(),
             cerebras_base_url: base_url,
+            anthropic_api_key: None,
+            anthropic_model: "claude-sonnet-4-20250514".to_owned(),
             database_url: "sqlite::memory:".to_owned(),
         }
     }
